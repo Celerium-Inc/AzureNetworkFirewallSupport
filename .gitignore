@@ -1,33 +1,57 @@
-# IDE and Editor files
-.idea/
+# Azure Functions artifacts
+bin
+obj
+appsettings.json
+local.settings.json
+
+.idea
+
+# PowerShell
+*.ps1.tests
+*.psm1.tests
+
+# VS Code
 .vscode/
+*.code-workspace
 
-# Azure Function local settings
-Event-Hub-Syslog-Forwarder/src/local.settings.json
-Blocklist Integration/code/local.settings.json
-
-# PowerShell modules
-**/modules/
-
-# Azure Function artifacts
-**/bin/
-**/obj/
-**/debug/
+# Azure Functions Core Tools
+.funcignore
+.python_packages/
 
 # Logs
-**/logs/
+logs/
+*.log
 
-# Environment files
-*.env
+# Environment variables
+.env
 
-# Certificates and keys
+# Credentials and secrets
 *.pfx
 *.key
-*.crt
 *.pem
+*.crt
+*.p12
 
-# Other
-*.user
-*.userosscache
-*.suo
-*.cache
+# Local development files
+local.settings.json
+*.local.*
+
+# Operating System
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*~
+
+# Build output
+dist/
+out/
+
+# Node.js (if using any Node.js tools)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

@@ -1,6 +1,6 @@
 # Azure Firewall Blocklist Integration Function
 # This function manages IP blocklists in Azure Firewall using IP Groups and Rule Collection Groups.
-# It supports:
+# Features:
 # - Testing connectivity to Azure resources
 # - Updating blocklist from external source
 # - Unblocking specific IPs
@@ -15,77 +15,82 @@ param(
     $TriggerMetadata    # Azure Functions runtime metadata
 )
 
-# Environment variables and constants
+# Required environment variables
 $subscriptionId = $env:SUBSCRIPTION_ID
 $resourceGroup = $env:RESOURCE_GROUP
 $firewallName = $env:FIREWALL_NAME
 $policyName = $env:POLICY_NAME
 $blocklistUrl = $env:BLKLIST_URL
+
+# Optional configuration with defaults
 $maxTotalIps = [int]($env:MAX_TOTAL_IPS ?? 50000)
 $maxIpsPerGroup = [int]($env:MAX_IPS_PER_GROUP ?? 5000)
 $maxIpGroups = [int]($env:MAX_IP_GROUPS ?? 10)
 $baseIpGroupName = $env:BASE_IP_GROUP_NAME ?? "fw-blocklist"
-
-# Set logging verbosity (1=Basic, 2=Verbose)
-$global:LogVerbosity = [int]($env:LOG_VERBOSITY ?? 2)  # Default to verbose logging
-
-# Fixed constants - these should not be changed as they're part of the integration
 $ruleCollectionGroupName = $env:RULE_COLLECTION_GROUP_NAME ?? "CeleriumRuleCollectionGroup"
 $ruleCollectionName = $env:RULE_COLLECTION_NAME ?? "Blocked-IP-Collection"
 $rulePriority = [int]($env:RULE_PRIORITY ?? 100)
 
-# At the start of the script, add error handling
+# Set logging verbosity (1=Basic, 2=Verbose)
+$global:LogVerbosity = [int]($env:LOG_VERBOSITY ?? 2)  # Default to verbose logging
+
+# Error handling preference
 $ErrorActionPreference = 'Stop'
 
-# Add more detailed logging with verbosity levels
+# Cache IP regex pattern for performance
+$script:ipRegex = [regex]'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$'
+
+# Add at start of script
+$script:jsonSettings = [Newtonsoft.Json.JsonSerializerSettings]@{
+    TypeNameHandling = 'None'
+    MaxDepth = 10
+}
+
+# Logging function with verbosity levels
 function Write-FunctionLog {
     param(
         [string]$Message,
         [ValidateSet("Information", "Warning", "Error", "Verbose")]
         [string]$Level = "Information"
     )
-    
+
     try {
         # Only write verbose logs if verbosity level is high enough
         $shouldWrite = switch ($Level) {
             "Verbose" { $global:LogVerbosity -ge 2 }
             default { $true }  # Always write Info/Warning/Error
         }
-        
+
         if ($shouldWrite) {
-            # Add color coding for different levels
             $color = switch ($Level) {
                 "Error" { "Red" }
                 "Warning" { "Yellow" }
                 "Verbose" { "Cyan" }
                 default { "White" }
             }
-            
             Write-Host "$(Get-Date -Format "yyyy-MM-dd HH:mm:ss") [$Level] $Message" -ForegroundColor $color
         }
     }
     catch {
         $errorRecord = $_
         $errorMessage = $errorRecord.Exception.Message
-        
+
         # Fallback to basic Write-Host if something goes wrong
         Write-Host "$(Get-Date -Format "yyyy-MM-dd HH:mm:ss") [ERROR] Logging failed: $errorMessage"
         Write-Host "Original message: $Message"
     }
 }
 
-# Cache IP regex pattern
-$script:ipRegex = [regex]'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$'
-
+# IP address validation with CIDR support
 function Test-IpAddress {
     param([string]$IpAddress)
-    
+
     # Strip CIDR notation if present
     $ip = $IpAddress -replace '/\d+$', ''
-    
+
     # Use cached regex and avoid double parsing
     if (-not $script:ipRegex.IsMatch($ip)) { return $false }
-    
+
     try {
         $parts = $ip.Split('.')
         return $parts.Count -eq 4 -and $parts.ForEach{
@@ -105,7 +110,7 @@ function Get-BlocklistIps {
         $request = [System.Net.WebRequest]::Create($Url)
         $response = $request.GetResponse()
         $reader = [System.IO.StreamReader]::new($response.GetResponseStream())
-        
+
         $ipList = [System.Collections.ArrayList]@()
         while (-not $reader.EndOfStream -and $ipList.Count -lt $maxTotalIps) {
             $line = $reader.ReadLine()
@@ -113,10 +118,10 @@ function Get-BlocklistIps {
                 [void]$ipList.Add($line)
             }
         }
-        
+
         $reader.Close()
         $response.Close()
-        
+
         return $ipList
     }
     catch {
@@ -131,19 +136,19 @@ function Split-IpsIntoGroups {
         [int]$MaxIpsPerGroup,
         [int]$MaxGroups
     )
-    
+
     $groups = @()
     $totalGroups = [Math]::Min([Math]::Ceiling($IpList.Count / $MaxIpsPerGroup), $MaxGroups)
-    
+
     for ($i = 0; $i -lt $totalGroups; $i++) {
         $startIndex = $i * $MaxIpsPerGroup
         $endIndex = [Math]::Min(($i + 1) * $MaxIpsPerGroup - 1, $IpList.Count - 1)
-        
+
         if ($startIndex -lt $IpList.Count) {
             $groups += ,@($IpList[$startIndex..$endIndex])
         }
     }
-    
+
     return $groups
 }
 
@@ -163,7 +168,7 @@ function Update-IpGroup {
         [Parameter(Mandatory = $true)]
         [string]$IpGroupName
     )
-    
+
     try {
         # Validate we have IPs to process
         if (-not $IpAddresses -or $IpAddresses.Count -eq 0) {
@@ -177,8 +182,6 @@ function Update-IpGroup {
         $formattedIps = $IpAddresses | ForEach-Object {
             if ($_ -match '/\d+$') { $_ } else { "$_/32" }
         }
-
-        Write-FunctionLog "Formatted first few IPs: $($formattedIps[0..([Math]::Min(4, $formattedIps.Count-1))])" -Level "Verbose"
 
         $baseUrl = "https://management.azure.com"
         $apiVersion = "2024-01-01"
@@ -248,7 +251,7 @@ function Write-ErrorResponse {
         [string]$Message,
         [int]$StatusCode = [HttpStatusCode]::InternalServerError
     )
-    
+
     # Don't write error to avoid double response
     Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
         StatusCode = $StatusCode
@@ -261,7 +264,7 @@ function Write-ErrorResponse {
     })
 }
 
-# Fix Update-RuleCollectionGroup function parameters
+# Update firewall rules with IP groups
 function Update-RuleCollectionGroup {
     param(
         [Parameter(Mandatory = $true)]
@@ -275,11 +278,11 @@ function Update-RuleCollectionGroup {
         [Parameter(Mandatory = $true)]
         [string[]]$IpGroupIds
     )
-    
+
     $baseUrl = "https://management.azure.com"
     $apiVersion = "2024-01-01"
     $url = "$baseUrl/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.Network/firewallPolicies/$FirewallPolicyName/ruleCollectionGroups/$ruleCollectionGroupName"
-    
+
     $body = @{
         properties = @{
             priority = $rulePriority
@@ -310,30 +313,32 @@ function Update-RuleCollectionGroup {
                 }
             )
         }
-    } | ConvertTo-Json -Compress -Depth 10
-    
-    $headers = @{
-        "Authorization" = "Bearer $Token"
-        "Content-Type" = "application/json"
     }
-    
+
     return Invoke-AzureRestMethod -Method Put -Uri "$url`?api-version=$apiVersion" `
-        -Headers $headers -Body $body -MaxRetries 3 -RetryDelay 5
+        -Headers @{
+            "Authorization" = "Bearer $Token"
+            "Content-Type" = "application/json"
+        } `
+        -Body ($body | ConvertTo-Json -Compress -Depth 10) `
+        -MaxRetries 3 `
+        -RetryDelay 5
 }
 
+# Write success responses in consistent format
 function Write-SuccessResponse {
     param(
         [string]$Message,
         [object]$Details = $null
     )
-    
+
     $response = @{
         status = 'success'
         message = $Message
         timestamp = Get-Date -Format 'o'
     }
     if ($Details) { $response.details = $Details }
-    
+
     Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
         StatusCode = [HttpStatusCode]::OK
         Body = $response | ConvertTo-Json -Compress -Depth 10
@@ -341,6 +346,7 @@ function Write-SuccessResponse {
     })
 }
 
+# Make Azure REST API calls with retry logic
 function Invoke-AzureRestMethod {
     param(
         [Parameter(Mandatory = $true)]
@@ -352,62 +358,53 @@ function Invoke-AzureRestMethod {
         [Parameter(Mandatory = $false)]
         [string]$Body,
         [Parameter(Mandatory = $false)]
-        [int]$MaxRetries = 5,         # Increased from 3 to 5
+        [int]$MaxRetries = 5,
         [Parameter(Mandatory = $false)]
-        [int]$RetryDelay = 10         # Increased from 5 to 10 seconds
+        [int]$RetryDelay = 10
     )
 
     $attempt = 1
     while ($attempt -le $MaxRetries) {
         try {
             Write-FunctionLog "API Request Attempt $attempt of $MaxRetries to $Uri"
-            
-            # Add delay before each retry (except first attempt)
+
             if ($attempt -gt 1) {
-                $delay = $RetryDelay * [Math]::Pow(2, ($attempt - 1))  # Exponential backoff
+                $delay = $RetryDelay * [Math]::Pow(2, ($attempt - 1))
                 Write-FunctionLog "Waiting $delay seconds before retry..." -Level "Warning"
                 Start-Sleep -Seconds $delay
             }
-            
+
             if ($Body) {
                 $result = Invoke-RestMethod -Method $Method -Uri $Uri -Headers $Headers -Body $Body
             }
             else {
                 $result = Invoke-RestMethod -Method $Method -Uri $Uri -Headers $Headers
             }
-            
+
             return $result
         }
         catch {
             $statusCode = $_.Exception.Response.StatusCode.value__
             $errorMessage = $_.ErrorDetails.Message
-            
+
             Write-FunctionLog "API request failed (Attempt $attempt): Status $statusCode - $errorMessage" -Level "Warning"
-            
+
             if ($attempt -eq $MaxRetries) {
                 Write-FunctionLog "Max retries reached. Failing operation." -Level "Error"
                 throw
             }
-            
+
             $attempt++
         }
     }
 }
-
-# Add at start of script
-$script:jsonSettings = [Newtonsoft.Json.JsonSerializerSettings]@{
-    TypeNameHandling = 'None'
-    MaxDepth = 10
-}
-
-# Add these functions before the main switch block:
 
 function Invoke-TestAction {
     param(
         [string]$Token,
         [hashtable]$Headers
     )
-    
+
     Write-FunctionLog "Starting test action..."
 
     # Log key variables for debugging
@@ -420,14 +417,14 @@ function Invoke-TestAction {
     # Test IP Groups
     $apiVersion = "2024-01-01"
     $ipGroupsUrl = "https://management.azure.com/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Network/ipGroups?api-version=$apiVersion"
-    
+
     Write-FunctionLog "Testing IP Groups access..."
     Write-FunctionLog "Request URL: $ipGroupsUrl"
-    
+
     try {
         $ipGroups = Invoke-RestMethod -Method Get -Uri $ipGroupsUrl -Headers $Headers -ErrorAction Stop
         $blockedIpGroups = $ipGroups.value | Where-Object { $_.name -like "$baseIpGroupName-*" }
-        
+
         if ($blockedIpGroups) {
             Write-FunctionLog "Found $($blockedIpGroups.Count) IP Groups matching pattern '$baseIpGroupName-*'"
             foreach ($group in $blockedIpGroups) {
@@ -444,10 +441,10 @@ function Invoke-TestAction {
 
     # Test Rule Collection Group
     $ruleCollectionUrl = "https://management.azure.com/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Network/firewallPolicies/$policyName/ruleCollectionGroups/$ruleCollectionGroupName?api-version=$apiVersion"
-    
+
     Write-FunctionLog "Testing Rule Collection Group access..."
     Write-FunctionLog "Request URL: $ruleCollectionUrl"
-    
+
     try {
         $ruleCollection = Invoke-RestMethod -Method Get -Uri $ruleCollectionUrl -Headers $Headers -ErrorAction Stop
         Write-FunctionLog "Successfully retrieved Rule Collection Group"
@@ -476,7 +473,7 @@ function Invoke-UpdateAction {
     param(
         [string]$Token
     )
-    
+
     Write-FunctionLog "Starting update action..."
     Write-FunctionLog "Fetching blocklist from URL: $blocklistUrl"
 
@@ -495,20 +492,20 @@ function Invoke-UpdateAction {
     Write-FunctionLog "Split IPs into $($ipGroups.Count) groups"
 
     $ipGroupResults = @()
-    
+
     foreach ($groupIndex in 0..($ipGroups.Count-1)) {
         $groupIps = $ipGroups[$groupIndex]
         $groupName = "$baseIpGroupName-{0:D3}" -f ($groupIndex + 1)
-        
+
         Write-FunctionLog "Processing group $($groupIndex + 1) of $($ipGroups.Count) with $($groupIps.Count) IPs"
-        
+
         try {
             $ipGroup = Update-IpGroup -Token $Token `
                 -SubscriptionId $subscriptionId `
                 -ResourceGroup $resourceGroup `
                 -IpAddresses $groupIps `
                 -IpGroupName $groupName
-                
+
             $ipGroupResults += @{
                 id = $ipGroup.id
                 name = $groupName
@@ -520,16 +517,16 @@ function Invoke-UpdateAction {
             $errorRecord = $_
             $errorMessage = $errorRecord.Exception.Message
             $stackTrace = $errorRecord.ScriptStackTrace
-            
+
             Write-FunctionLog "Failed to update group $groupName. Error: $errorMessage" -Level "Error"
             Write-FunctionLog "Stack trace: $stackTrace" -Level "Error"
-            
+
             throw "Failed to process IP group '$groupName': $errorMessage"
         }
     }
 
     Write-FunctionLog "Updating Rule Collection Group with $($ipGroupResults.Count) IP groups..."
-    
+
     $result = Update-RuleCollectionGroup -Token $Token `
         -SubscriptionId $subscriptionId `
         -ResourceGroup $resourceGroup `
@@ -556,7 +553,7 @@ function Invoke-UnblockAction {
         [string]$Token,
         [PSCustomObject]$Body
     )
-    
+
     Write-FunctionLog "Starting unblock action..."
     Write-FunctionLog "Request body type: $($Body.GetType().Name)" -Level "Verbose"
     Write-FunctionLog "Request body: $($Body | ConvertTo-Json)" -Level "Verbose"
@@ -574,12 +571,12 @@ function Invoke-UnblockAction {
 
     Write-FunctionLog "Starting IP validation..."
     # Validate IPs and strip CIDR notation
-    $validIps = $IpsToUnblock | ForEach-Object { 
+    $validIps = $IpsToUnblock | ForEach-Object {
         $ip = $_ -replace '/\d+$', ''  # Strip CIDR notation
         Write-FunctionLog "Validating IP: $ip" -Level "Verbose"
-        if (Test-IpAddress $ip) { 
+        if (Test-IpAddress $ip) {
             Write-FunctionLog "IP is valid: $ip" -Level "Verbose"
-            $ip 
+            $ip
         }
     }
     Write-FunctionLog "IP validation complete. Found $($validIps.Count) valid IPs"
@@ -588,7 +585,7 @@ function Invoke-UnblockAction {
     Write-FunctionLog "Fetching IP groups..."
     $apiVersion = "2024-01-01"
     $ipGroupsUrl = "https://management.azure.com/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Network/ipGroups?api-version=$apiVersion"
-    
+
     try {
         Write-FunctionLog "Making API request to: $ipGroupsUrl"
         $ipGroups = Invoke-AzureRestMethod -Method Get -Uri $ipGroupsUrl `
@@ -596,10 +593,10 @@ function Invoke-UnblockAction {
             -MaxRetries 3 `
             -RetryDelay 5
         Write-FunctionLog "Successfully retrieved IP groups"
-        
+
         $blockedIpGroups = $ipGroups.value | Where-Object { $_.name -like "$baseIpGroupName-*" }
         Write-FunctionLog "Found $($blockedIpGroups.Count) matching IP groups"
-        
+
         foreach ($group in $blockedIpGroups) {
             Write-FunctionLog "Group $($group.name) has $($group.properties.ipAddresses.Count) IPs" -Level "Verbose"
         }
@@ -618,26 +615,26 @@ function Invoke-UnblockAction {
         # Get current IPs both with and without CIDR
         $currentIpsWithCidr = $group.properties.ipAddresses
         $currentIpsWithoutCidr = $currentIpsWithCidr | ForEach-Object { $_ -replace '/32$', '' }
-        
+
         # Check for matches in both formats
-        $ipsToRemove = $validIps | Where-Object { 
+        $ipsToRemove = $validIps | Where-Object {
             $ip = $_
-            $ip -in $currentIpsWithoutCidr -or "$ip/32" -in $currentIpsWithCidr 
+            $ip -in $currentIpsWithoutCidr -or "$ip/32" -in $currentIpsWithCidr
         }
-        
+
         if ($ipsToRemove) {
             Write-FunctionLog "Found $($ipsToRemove.Count) IPs to remove from group $($group.name)"
-            
+
             # Keep original CIDR format for remaining IPs
-            $remainingIps = $currentIpsWithCidr | Where-Object { 
-                ($_ -replace '/32$', '') -notin $ipsToRemove 
+            $remainingIps = $currentIpsWithCidr | Where-Object {
+                ($_ -replace '/32$', '') -notin $ipsToRemove
             }
-            
+
             if ($remainingIps.Count -eq 0) {
                 Write-FunctionLog "Group would be empty, adding placeholder IP" -Level "Warning"
                 $remainingIps = @("0.0.0.0/32")  # Placeholder IP if group would be empty
             }
-            
+
             try {
                 Write-FunctionLog "Group object: $($group | ConvertTo-Json)" -Level "Verbose"
                 Write-FunctionLog "Group name: $($group.name)" -Level "Verbose"
@@ -648,7 +645,7 @@ function Invoke-UnblockAction {
                     -ResourceGroup $resourceGroup `
                     -IpAddresses $remainingIps `
                     -IpGroupName $group.name
-                
+
                 Write-FunctionLog "Updated IP Group $($group.name) with $($remainingIps.Count) IPs" -Level "Verbose"
                 $updatedGroups += @{
                     id = $ipGroup.id
@@ -656,7 +653,7 @@ function Invoke-UnblockAction {
                     removedCount = $ipsToRemove.Count
                     remainingCount = $remainingIps.Count
                 }
-                
+
                 [void]$unblocked.AddRange([string[]]@($ipsToRemove))
                 Write-FunctionLog "Successfully updated group $($group.name) with $($remainingIps.Count) IPs"
             }
@@ -685,7 +682,7 @@ function Invoke-UnblockAction {
         -ResourceGroup $resourceGroup `
         -FirewallPolicyName $policyName `
         -IpGroupIds ($blockedIpGroups | ForEach-Object { $_.id })  # Get id from each group
-    
+
     Write-SuccessResponse -Message "Successfully unblocked IPs" -Details @{
         updatedGroups = $updatedGroups
         ruleCollectionGroup = $result
@@ -717,12 +714,12 @@ try {
             client_secret = $env:CLIENT_SECRET
             scope = "https://management.azure.com/.default"
         }
-        
+
         $tokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUrl -Body $tokenBody
         if (-not $tokenResponse.access_token) {
             throw "Failed to get valid access token"
         }
-        
+
         $headers = @{
             "Authorization" = "Bearer $($tokenResponse.access_token)"
             "Content-Type" = "application/json"
@@ -745,7 +742,6 @@ try {
                 Invoke-UpdateAction -Token $tokenResponse.access_token
             }
             'unblock' {
-                # Pass parsed body to unblock action
                 Invoke-UnblockAction -Token $tokenResponse.access_token -Body $Request.Body
             }
             default {
@@ -757,21 +753,21 @@ try {
         $errorRecord = $_
         $errorMessage = $errorRecord.Exception.Message
         $stackTrace = $errorRecord.ScriptStackTrace
-        
+
         Write-FunctionLog "$action action failed: $errorMessage" -Level "Error"
         Write-FunctionLog "Stack trace: $stackTrace" -Level "Error"
-        
+
         $statusMessage = switch ($action.ToLower()) {
             'test' { "Test failed" }
             'update' { "Failed to update firewall policy" }
             'unblock' { "Failed to unblock IPs" }
             default { "Action failed" }
         }
-        
+
         Write-ErrorResponse -Message "$statusMessage - $errorMessage" -StatusCode 500
     }
 }
 catch {
     Write-FunctionLog "Unhandled error: $_" -Level "Error"
     Write-ErrorResponse -Message "Internal server error: $_" -StatusCode 500
-} 
+}

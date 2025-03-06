@@ -1,6 +1,6 @@
 # Azure Firewall Blocklist Integration
 
-This Azure Function integrates external IP blocklists with Azure Firewall using IP Groups and Rule Collection Groups.
+Azure Function that manages IP blocklists in Azure Firewall using IP Groups and Rule Collection Groups. Automatically fetches and updates blocked IPs from an external source.
 
 ## Features
 - Fetch and validate IP addresses from external blocklists
@@ -35,17 +35,25 @@ This Azure Function integrates external IP blocklists with Azure Firewall using 
 
 ### Test Connection
 ```http
-GET /api/blocklist?action=test
+GET /api/blocklist?action=test&code={function_key}
 ```
 
 ### Update Blocklist
 ```http
-GET /api/blocklist?action=update
+GET /api/blocklist?action=update&code={function_key}
 ```
 
 ### Unblock IPs
 ```http
-GET /api/blocklist?action=unblock&IPs=1.1.1.1,2.2.2.2
+POST /api/blocklist?action=unblock&code={function_key}
+Content-Type: application/json
+
+{
+    "IpsToUnblock": [
+        "1.1.1.1",
+        "2.2.2.2"
+    ]
+}
 ```
 
 ## Deployment
@@ -70,29 +78,83 @@ The function includes comprehensive error handling:
 
 ## Quick Start
 
-1. Deploy the function app:
-```powershell
-./deploy.ps1 -ResourceGroupName "your-rg" `
-             -Location "your-location" `
-             -FunctionAppName "your-func-name" `
-             -StorageAccountName "your-storage"
+1. Clone the repository:
+```bash
+git clone <repository-url>
+cd <repository-directory>
 ```
 
-2. Configure the function app settings:
+2. Deploy using PowerShell:
 ```powershell
-az functionapp config appsettings set --name <function-app-name> --resource-group <resource-group> --settings "FIREWALL_NAME=<your-firewall-name>" "POLICY_NAME=<your-policy-name>" "TENANT_ID=<tenant-id>" "CLIENT_ID=<client-id>" "CLIENT_SECRET=<client-secret>" "SUBSCRIPTION_ID=<subscription-id>" "RESOURCE_GROUP=<resource-group>" "BLKLIST_URL=<your-blocklist-url>"
+./deploy.ps1 `
+    -ResourceGroupName "your-rg" `
+    -Location "eastus" `
+    -FunctionAppName "your-func-name" `
+    -StorageAccountName "yourstorage" `
+    -FirewallPolicyName "your-policy" `
+    -FirewallName "your-firewall" `
+    -TenantId "your-tenant-id" `
+    -ClientId "your-client-id" `
+    -ClientSecret "your-client-secret" `
+    -BlocklistUrl "https://your-blocklist-url"
 ```
 
 3. Test the deployment:
-```http
-GET https://<function-app-name>.azurewebsites.net/api/blocklist?action=test&code=<function-key>
+```powershell
+# Get your function key from Azure Portal > Function App > App keys
+$functionKey = "your-function-key"
+$functionApp = "your-func-name"
+
+# Test connectivity
+Invoke-RestMethod "https://$functionApp.azurewebsites.net/api/blocklist?action=test&code=$functionKey"
 ```
 
 ## Documentation
 
-- [Setup Guide](Setup.md) - Detailed setup instructions
-- [API Reference](API.md) - API documentation and examples
+### [Setup Guide](Setup.md)
+- Prerequisites
+- Detailed deployment steps
+- Configuration options
+- Troubleshooting guide
+- Cleanup instructions
+
+### [API Reference](API-Reference.md)
+- API endpoints and usage
+- Detailed action descriptions
+- Request/response formats
+- Error handling
+- Implementation details
+
+## Example Usage
+
+### Update Blocklist
+```powershell
+# Update blocklist from configured URL
+Invoke-RestMethod "https://$functionApp.azurewebsites.net/api/blocklist?action=update&code=$functionKey"
+```
+
+### Unblock IPs
+```powershell
+# Unblock specific IPs
+$body = @{
+    IpsToUnblock = @("1.1.1.1", "2.2.2.2")
+} | ConvertTo-Json
+
+Invoke-RestMethod "https://$functionApp.azurewebsites.net/api/blocklist?action=unblock&code=$functionKey" `
+    -Method Post `
+    -Body $body `
+    -ContentType "application/json"
+```
+
+## Cleanup
+
+To remove all deployed resources:
+```powershell
+./cleanup.ps1 `
+    -ResourceGroupName "your-rg" `
+    -FunctionAppName "your-func-name" `
+    -StorageAccountName "yourstorage"
+```
 
 ## License
-
 [MIT License](LICENSE)
