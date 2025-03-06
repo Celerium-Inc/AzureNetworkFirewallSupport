@@ -1,0 +1,57 @@
+# Azure Functions artifacts
+bin
+obj
+appsettings.json
+local.settings.json
+
+# PowerShell
+*.ps1.tests
+*.psm1.tests
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Azure Functions Core Tools
+.funcignore
+.python_packages/
+
+# Logs
+logs/
+*.log
+
+# Environment variables
+.env
+
+# Credentials and secrets
+*.pfx
+*.key
+*.pem
+*.crt
+*.p12
+
+# Local development files
+local.settings.json
+*.local.*
+
+# Operating System
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*~
+
+# Build output
+dist/
+out/
+
+# Node.js (if using any Node.js tools)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log* 
+
+.DS_Store

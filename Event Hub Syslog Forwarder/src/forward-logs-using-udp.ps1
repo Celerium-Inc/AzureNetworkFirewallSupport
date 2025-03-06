@@ -1,17 +1,28 @@
 # This script processes Azure Event Hub messages containing various log types (Flow Logs, DNS Queries, DNS Responses, Firewall Logs)
-# and forwards them to a syslog server over UDP. It handles message parsing, formatting, and transmission.
+# and forwards them to a syslog server over UDP. It handles message parsing, formatting, and secure transmission.
 
 param(
     [Parameter(Mandatory = $true)]
-    [Array]$eventHubMessages  # Array of messages received from Azure Event Hub
+    [Array]$eventHubMessages
 )
 
-# Syslog Server Configuration
-$syslogServer = "dev2-d3-syslog.cdndev.net"
-$syslogPort = 40678
+# Validate required environment variables
+if (-not $env:SYSLOG_SERVER) {
+    throw "SYSLOG_SERVER environment variable is not set"
+}
 
-# Log the function start
-Write-Host "Function triggered at $( Get-Date -Format 'yyyy-MM-dd HH:mm:ss' )"
+if (-not $env:SYSLOG_PORT) {
+    throw "SYSLOG_PORT environment variable is not set"
+}
+
+# Get syslog server connection details from environment variables
+$syslogServer = $env:SYSLOG_SERVER
+$syslogPort = [int]$env:SYSLOG_PORT
+
+# Log the function start with configuration
+Write-Host "Function triggered at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+Write-Host "Using Syslog Server: $syslogServer"
+Write-Host "Using Syslog Port: $syslogPort"
 
 if (-not $eventHubMessages)
 {
@@ -23,7 +34,7 @@ if (-not $eventHubMessages)
 $successfullyProcessedCount = 0
 
 # Function to send message to syslog with error handling
-function SendToSyslog
+function SendToSyslogOverUDP
 {
     param (
         [string]$Message,    # The formatted syslog message to send
@@ -46,7 +57,7 @@ function SendToSyslog
     }
 }
 
-# Function to format timestamp to RFC3339 with error handling
+# Function to convert timestamps to RFC3339 format (ISO 8601) with UTC timezone
 function ConvertTo-RFC3339
 {
     param (
@@ -71,11 +82,12 @@ function ConvertTo-RFC3339
     }
 }
 
-# Process each event
+# Process each event from the Event Hub message batch
 foreach ($event in $eventHubMessages)
 {
     try
     {
+        # Array to store formatted syslog messages before sending
         $syslogMessages = @()
 
         # Log the raw event for debugging
@@ -100,7 +112,7 @@ foreach ($event in $eventHubMessages)
             }
         }
 
-        # Process each record in the event
+        # Process each record based on log type
         foreach ($record in $message.records)
         {
             # Handle different log types:
@@ -108,7 +120,7 @@ foreach ($event in $eventHubMessages)
             # 2. Azure Firewall DNS Query Logs (category = AZFWDnsQuery)
             # 3. Azure Firewall DNS Response Logs (category = DnsResponse)
             # 4. Azure Firewall Network/Application Rules Logs (default case)
-            
+
             if ($record.SubType -eq "FlowLog")
             {
                 # Process Virtual Network Flow Logs
@@ -164,19 +176,19 @@ foreach ($event in $eventHubMessages)
                 $tenantId = $record.TenantId
 
                 # Format the syslog message with all fields
-                $syslogMessage = "<13>TimeGenerated=${timestamp} Type=FlowLog FaSchemaVersion=${faSchemaVersion} " +            `
-                                    "TimeProcessed=${timeProcessed} FlowIntervalStart=${flowIntervalStart} FlowIntervalEnd=${flowIntervalEnd} " +            `
-                                    "FlowStartTime=${flowStartTime} FlowEndTime=${flowEndTime} FlowType=${flowType} " +            `
-                                    "IsFlowCapturedAtUdrHop=${isFlowCapturedAtUdrHop} SrcIp=${srcIp} DstIp=${destIp} DstPort=${destPort} " +            `
-                                    "Protocol=${protocol} L7Protocol=${l7Protocol} Direction=${flowDirection} Status=${flowStatus} " +            `
-                                    "MacAddress=${macAddress} FlowLogResourceId=${flowLogResourceId} TargetResourceId=${targetResourceId} " +            `
-                                    "TargetResourceType=${targetResourceType} DestSubscription=${destSubscription} DestRegion=${destRegion} " +            `
-                                    "DestNic=${destNic} DestVm=${destVm} DestSubnet=${destSubnet} FlowEncryption=${flowEncryption} " +            `
-                                    "AllowedInFlows=${allowedInFlows} DeniedInFlows=${deniedInFlows} AllowedOutFlows=${allowedOutFlows} " +            `
-                                    "DeniedOutFlows=${deniedOutFlows} PacketsDestToSrc=${packetsDestToSrc} PacketsSrcToDest=${packetsSrcToDest} " +            `
-                                    "BytesDestToSrc=${bytesDestToSrc} BytesSrcToDest=${bytesSrcToDest} CompletedFlows=${completedFlows} " +            `
-                                    "AclGroup=${aclGroup} AclRule=${aclRule} ItemId=${itemId} WorkspaceResourceId=${workspaceResourceId} " +            `
-                                    "EventType=${eventType} TenantId=${tenantId}"
+                $syslogMessage = "<13>TimeGenerated=${timestamp} Type=FlowLog FaSchemaVersion=${faSchemaVersion} " +             `
+                                     "TimeProcessed=${timeProcessed} FlowIntervalStart=${flowIntervalStart} FlowIntervalEnd=${flowIntervalEnd} " +             `
+                                     "FlowStartTime=${flowStartTime} FlowEndTime=${flowEndTime} FlowType=${flowType} " +             `
+                                     "IsFlowCapturedAtUdrHop=${isFlowCapturedAtUdrHop} SrcIp=${srcIp} DstIp=${destIp} DstPort=${destPort} " +             `
+                                     "Protocol=${protocol} L7Protocol=${l7Protocol} Direction=${flowDirection} Status=${flowStatus} " +             `
+                                     "MacAddress=${macAddress} FlowLogResourceId=${flowLogResourceId} TargetResourceId=${targetResourceId} " +             `
+                                     "TargetResourceType=${targetResourceType} DestSubscription=${destSubscription} DestRegion=${destRegion} " +             `
+                                     "DestNic=${destNic} DestVm=${destVm} DestSubnet=${destSubnet} FlowEncryption=${flowEncryption} " +             `
+                                     "AllowedInFlows=${allowedInFlows} DeniedInFlows=${deniedInFlows} AllowedOutFlows=${allowedOutFlows} " +             `
+                                     "DeniedOutFlows=${deniedOutFlows} PacketsDestToSrc=${packetsDestToSrc} PacketsSrcToDest=${packetsSrcToDest} " +             `
+                                     "BytesDestToSrc=${bytesDestToSrc} BytesSrcToDest=${bytesSrcToDest} CompletedFlows=${completedFlows} " +             `
+                                     "AclGroup=${aclGroup} AclRule=${aclRule} ItemId=${itemId} WorkspaceResourceId=${workspaceResourceId} " +             `
+                                     "EventType=${eventType} TenantId=${tenantId}"
                 $syslogMessages += $syslogMessage
 
             }
@@ -204,12 +216,12 @@ foreach ($event in $eventHubMessages)
                 $errorMessage = $record.properties.ErrorMessage
 
                 # Format the syslog message for DNS logs
-                $syslogMessage = "<13>TimeGenerated=${timestamp} Type=DnsQueryLog " +            `
-                                    "ResourceId=${resourceId} SrcIp=${sourceIp} SrcPort=${sourcePort} QueryId=${queryId} " +            `
-                                    "QueryType=${queryType} QueryClass=${queryClass} QueryName=${queryName} Protocol=${protocol} " +            `
-                                    "RequestSize=${requestSize} DnssecOkBit=${dnssecOkBit} EDNS0BufferSize=${edns0BufferSize} " +            `
-                                    "ResponseCode=${responseCode} ResponseFlags=${responseFlags} ResponseSize=${responseSize} " +            `
-                                    "RequestDurationSecs=${requestDurationSecs} ErrorNumber=${errorNumber} ErrorMessage=${errorMessage}"
+                $syslogMessage = "<13>TimeGenerated=${timestamp} Type=DnsQueryLog " +             `
+                                     "ResourceId=${resourceId} SrcIp=${sourceIp} SrcPort=${sourcePort} QueryId=${queryId} " +             `
+                                     "QueryType=${queryType} QueryClass=${queryClass} QueryName=${queryName} Protocol=${protocol} " +             `
+                                     "RequestSize=${requestSize} DnssecOkBit=${dnssecOkBit} EDNS0BufferSize=${edns0BufferSize} " +             `
+                                     "ResponseCode=${responseCode} ResponseFlags=${responseFlags} ResponseSize=${responseSize} " +             `
+                                     "RequestDurationSecs=${requestDurationSecs} ErrorNumber=${errorNumber} ErrorMessage=${errorMessage}"
                 $syslogMessages += $syslogMessage
 
             }
@@ -238,7 +250,7 @@ foreach ($event in $eventHubMessages)
                 $resolverPolicyId = $record.properties.resolverpolicy_id
                 $resolverPolicyRuleAction = $record.properties.resolverpolicy_rule_action
 
-                # Iterate over each DNS answer and store syslog messages
+                # Process each DNS answer in the response
                 $answerIndex = 0
                 foreach ($answer in $record.properties.answer)
                 {
@@ -250,15 +262,15 @@ foreach ($event in $eventHubMessages)
                         $dnsAnswerRData = $answer.RData
 
                         # Format the syslog message for each answer
-                        $syslogMessage = "<13>TimeGenerated=${timestamp} Type=DnsResponseLog " + `
-                                            "ResourceId=${resourceId} OperationName=${operationName} Version=${version} " + `
-                                            "SubId=${subId} Region=${region} VnetId=${vnetId} QueryName=${queryName} " + `
-                                            "QueryType=${queryType} QueryClass=${queryClass} ResponseCode=${responseCode} " + `
-                                            "SrcIpAddr=${srcIpAddr} SrcPort=${srcPort} DstIpAddr=${dstIpAddr} DstPort=${dstPort} " + `
-                                            "Transport=${transport} QueryResponseTime=${queryResponseTime} ResolutionPath=${resolutionPath} " + `
-                                            "ResolverPolicyId=${resolverPolicyId} ResolverPolicyRuleAction=${resolverPolicyRuleAction} " + `
-                                            "DnsAnswerIndex=${answerIndex} DnsAnswerType=${dnsAnswerType} DnsAnswerClass=${dnsAnswerClass} " + `
-                                            "DnsAnswerTTL=${dnsAnswerTTL} DnsAnswerRData=${dnsAnswerRData}"
+                        $syslogMessage = "<13>TimeGenerated=${timestamp} Type=DnsResponseLog " +  `
+                                             "ResourceId=${resourceId} OperationName=${operationName} Version=${version} " +  `
+                                             "SubId=${subId} Region=${region} VnetId=${vnetId} QueryName=${queryName} " +  `
+                                             "QueryType=${queryType} QueryClass=${queryClass} ResponseCode=${responseCode} " +  `
+                                             "SrcIpAddr=${srcIpAddr} SrcPort=${srcPort} DstIpAddr=${dstIpAddr} DstPort=${dstPort} " +  `
+                                             "Transport=${transport} QueryResponseTime=${queryResponseTime} ResolutionPath=${resolutionPath} " +  `
+                                             "ResolverPolicyId=${resolverPolicyId} ResolverPolicyRuleAction=${resolverPolicyRuleAction} " +  `
+                                             "DnsAnswerIndex=${answerIndex} DnsAnswerType=${dnsAnswerType} DnsAnswerClass=${dnsAnswerClass} " +  `
+                                             "DnsAnswerTTL=${dnsAnswerTTL} DnsAnswerRData=${dnsAnswerRData}"
 
                         # Add message to the global array
                         $syslogMessages += $syslogMessage
@@ -291,31 +303,30 @@ foreach ($event in $eventHubMessages)
                 $actionReason = $record.properties.ActionReason
 
                 # Format the syslog message
-                $syslogMessage = "<13>TimeGenerated=${timestamp} Type=FirewallLog " +            `
-                                    "ResourceId=${resourceId} Protocol=${protocol} SrcIp=${sourceIp} SrcPort=${sourcePort} " +            `
-                                    "DstIp=${destinationIp} DstPort=${destinationPort} Action=${action} " +            `
-                                    "Policy=${policy} RuleCollectionGroup=${ruleCollectionGroup} RuleCollection=${ruleCollection} " +            `
-                                    "Rule=${rule} ActionReason=${actionReason}"
+                $syslogMessage = "<13>TimeGenerated=${timestamp} Type=FirewallLog " +             `
+                                     "ResourceId=${resourceId} Protocol=${protocol} SrcIp=${sourceIp} SrcPort=${sourcePort} " +             `
+                                     "DstIp=${destinationIp} DstPort=${destinationPort} Action=${action} " +             `
+                                     "Policy=${policy} RuleCollectionGroup=${ruleCollectionGroup} RuleCollection=${ruleCollection} " +             `
+                                     "Rule=${rule} ActionReason=${actionReason}"
                 $syslogMessages += $syslogMessage
             }
         }
 
-        # Increment processed count
+        # Increment successfully processed count
         $successfullyProcessedCount++
 
     }
     catch
     {
         Write-Error "Error processing record: $( $record | ConvertTo-Json -Depth 10 ) - Error: $_"
-
     }
 
-    # Send all collected syslog messages at the end in a single loop
+    # Send all collected syslog messages for this event
     foreach ($syslogMessage in $syslogMessages)
     {
         try
         {
-            SendToSyslog -Message $syslogMessage -Server $syslogServer -Port $syslogPort
+            SendToSyslogOverUDP -Message $syslogMessage -Server $syslogServer -Port $syslogPort
         }
         catch
         {
@@ -324,5 +335,5 @@ foreach ($event in $eventHubMessages)
     }
 }
 
-# Log the total processed events count
+# Log summary of processed events
 Write-Host "Successfully processed $successfullyProcessedCount out of $( $eventHubMessages.Length ) event(s)."

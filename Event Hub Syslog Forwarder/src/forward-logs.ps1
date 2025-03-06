@@ -3,15 +3,26 @@
 
 param(
     [Parameter(Mandatory = $true)]
-    [Array]$eventHubMessages  # Array of messages received from Azure Event Hub
+    [Array]$eventHubMessages
 )
 
-# Syslog server connection details
-$syslogServer = "dev2-d3-syslog.cdndev.net"
-$syslogPort = 40678
+# Validate required environment variables
+if (-not $env:SYSLOG_SERVER) {
+    throw "SYSLOG_SERVER environment variable is not set"
+}
 
-# Log the function start
-Write-Host "Function triggered at $( Get-Date -Format 'yyyy-MM-dd HH:mm:ss' )"
+if (-not $env:SYSLOG_PORT) {
+    throw "SYSLOG_PORT environment variable is not set"
+}
+
+# Get syslog server connection details from environment variables
+$syslogServer = $env:SYSLOG_SERVER
+$syslogPort = [int]$env:SYSLOG_PORT
+
+# Log the function start with configuration
+Write-Host "Function triggered at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+Write-Host "Using Syslog Server: $syslogServer"
+Write-Host "Using Syslog Port: $syslogPort"
 
 if (-not $eventHubMessages)
 {

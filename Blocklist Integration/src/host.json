@@ -1,0 +1,30 @@
+{
+    "version": "2.0",
+    "logging": {
+        "applicationInsights": {
+            "samplingSettings": {
+                "isEnabled": true,
+                "excludedTypes": "Request"
+            }
+        },
+        "logLevel": {
+            "default": "Information",
+            "Function": "Debug"
+        }
+    },
+    "extensionBundle": {
+        "id": "Microsoft.Azure.Functions.ExtensionBundle",
+        "version": "[3.*, 4.0.0)"
+    },
+    "managedDependency": {
+        "enabled": true
+    },
+    "cors": {
+        "allowedOrigins": [
+            "https://portal.azure.com",
+            "https://ms.portal.azure.com",
+            "https://functions.azure.com"
+        ],
+        "supportCredentials": false
+    }
+}

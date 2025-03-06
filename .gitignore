@@ -1,0 +1,33 @@
+# IDE and Editor files
+.idea/
+.vscode/
+
+# Azure Function local settings
+Event-Hub-Syslog-Forwarder/src/local.settings.json
+Blocklist Integration/code/local.settings.json
+
+# PowerShell modules
+**/modules/
+
+# Azure Function artifacts
+**/bin/
+**/obj/
+**/debug/
+
+# Logs
+**/logs/
+
+# Environment files
+*.env
+
+# Certificates and keys
+*.pfx
+*.key
+*.crt
+*.pem
+
+# Other
+*.user
+*.userosscache
+*.suo
+*.cache
