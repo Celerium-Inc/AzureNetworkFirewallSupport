@@ -155,6 +155,3 @@ To remove all deployed resources:
     -FunctionAppName "your-func-name" `
     -StorageAccountName "yourstorage"
 ```
-
-## License
-[MIT License](LICENSE)

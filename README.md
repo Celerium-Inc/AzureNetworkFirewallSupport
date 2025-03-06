@@ -24,19 +24,9 @@ Azure Function that forwards Event Hub messages to a Syslog server over SSL/UDP.
 - Configurable syslog formatting
 - Detailed error handling and logging
 
-#### Project Structure
-```
-/Event Hub Syslog Forwarder/
-├── src/                           # Source code directory
-│   ├── forward-logs.ps1          # SSL/TLS implementation
-│   └── forward-logs-using-udp.ps1 # UDP implementation
-└── README.md                      # Project documentation
-```
-
 ## Repository Structure
 
 ```
-/
 ├── Blocklist Integration/         # IP Blocklist Manager
 │   ├── src/                      # Function source code
 │   │   ├── run.ps1              # Main function script
@@ -47,8 +37,7 @@ Azure Function that forwards Event Hub messages to a Syslog server over SSL/UDP.
 │   ├── cleanup.ps1              # Resource cleanup script
 │   ├── README.md                # Function documentation
 │   ├── API-Reference.md         # API documentation
-│   ├── Setup.md                 # Detailed setup guide
-│   └── Overview.md              # Technical overview
+│   └── Setup.md                 # Detailed setup guide
 ├── Event Hub Syslog Forwarder/   # Syslog Forwarder
 │   ├── src/                     # Source code directory
 │   │   ├── forward-logs.ps1     # SSL/TLS implementation
@@ -77,13 +66,3 @@ Azure Function that forwards Event Hub messages to a Syslog server over SSL/UDP.
 - [IP Blocklist Manager Setup](Blocklist%20Integration/Setup.md)
 - [IP Blocklist API Reference](Blocklist%20Integration/API-Reference.md)
 - [Syslog Forwarder Documentation](Event%20Hub%20Syslog%20Forwarder/README.md)
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Submit a pull request
-
-## License
-
-This project is licensed under the MIT License. 
