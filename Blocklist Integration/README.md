@@ -49,17 +49,11 @@ POST /api/blocklist?action=unblock&code={function_key}
 Content-Type: application/json
 
 {
-    "IpsToUnblock": [
+    "ips": [
         "1.1.1.1",
         "2.2.2.2"
     ]
 }
-```
-
-## Deployment
-Use the provided `deploy.ps1` script to deploy the function:
-```powershell
-./deploy.ps1 -ResourceGroup <rg-name> -Location <location>
 ```
 
 ## Error Handling
@@ -128,27 +122,31 @@ Invoke-RestMethod "https://$functionApp.azurewebsites.net/api/blocklist?action=t
 ## Example Usage
 
 ### Update Blocklist
-```powershell
+```bash
 # Update blocklist from configured URL
-Invoke-RestMethod "https://$functionApp.azurewebsites.net/api/blocklist?action=update&code=$functionKey"
+curl "https://$functionApp.azurewebsites.net/api/blocklist?action=update&code=$functionKey"
 ```
 
 ### Unblock IPs
-```powershell
+```bash
 # Unblock specific IPs
-$body = @{
-    IpsToUnblock = @("1.1.1.1", "2.2.2.2")
-} | ConvertTo-Json
+curl "https://$functionApp.azurewebsites.net/api/blocklist?action=unblock&code=$functionKey" \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -d '{
+    "ips": ["1.1.1.1", "2.2.2.2"]
+  }'
+```
 
-Invoke-RestMethod "https://$functionApp.azurewebsites.net/api/blocklist?action=unblock&code=$functionKey" `
-    -Method Post `
-    -Body $body `
-    -ContentType "application/json"
+### Test Connection
+```bash
+# Test the function configuration and connectivity
+curl "https://$functionApp.azurewebsites.net/api/blocklist?action=test&code=$functionKey"
 ```
 
 ## Cleanup
 
-To remove all deployed resources:
+To remove the function and storage deployed resources:
 ```powershell
 ./cleanup.ps1 `
     -ResourceGroupName "your-rg" `
