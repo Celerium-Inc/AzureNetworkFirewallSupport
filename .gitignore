@@ -4,6 +4,8 @@ obj
 appsettings.json
 local.settings.json
 
+.DS_Store
+
 .idea
 
 # PowerShell
