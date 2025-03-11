@@ -1,5 +1,5 @@
 # This script processes Azure Event Hub messages containing various log types (Flow Logs, DNS Queries, DNS Responses, Firewall Logs)
-# and forwards them to a syslog server over SSL. It handles message parsing, formatting, and secure transmission.
+# and forwards them to a syslog server over SSL or UDP based on configuration.
 
 param(
     [Parameter(Mandatory = $true)]
@@ -15,6 +15,12 @@ if (-not $env:SYSLOG_PORT) {
     throw "SYSLOG_PORT environment variable is not set"
 }
 
+# Get protocol from environment variable (defaults to SSL if not specified)
+$protocol = if ($env:SYSLOG_PROTOCOL) { $env:SYSLOG_PROTOCOL.ToUpper() } else { "SSL" }
+if ($protocol -notin @("SSL", "UDP")) {
+    throw "SYSLOG_PROTOCOL must be either 'SSL' or 'UDP'"
+}
+
 # Get syslog server connection details from environment variables
 $syslogServer = $env:SYSLOG_SERVER
 $syslogPort = [int]$env:SYSLOG_PORT
@@ -23,6 +29,7 @@ $syslogPort = [int]$env:SYSLOG_PORT
 Write-Host "Function triggered at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 Write-Host "Using Syslog Server: $syslogServer"
 Write-Host "Using Syslog Port: $syslogPort"
+Write-Host "Using Protocol: $protocol"
 
 if (-not $eventHubMessages)
 {
@@ -34,39 +41,49 @@ if (-not $eventHubMessages)
 $successfullyProcessedCount = 0
 
 # Function to send message to syslog with error handling
-function SendToSyslogOverSSL
+function SendToSyslog
 {
     param (
         [string]$Message,    # The formatted syslog message to send
         [string]$Server,     # Syslog server hostname/IP
-        [int]$Port          # Syslog server port
+        [int]$Port,         # Syslog server port
+        [string]$Protocol   # SSL or UDP
     )
     try
     {
-        # Establish a TCP connection
-        $tcpClient = New-Object System.Net.Sockets.TcpClient
-        $tcpClient.Connect($Server, $Port)
-        $networkStream = $tcpClient.GetStream()
+        if ($Protocol -eq "SSL") {
+            # Establish a TCP connection for SSL
+            $tcpClient = New-Object System.Net.Sockets.TcpClient
+            $tcpClient.Connect($Server, $Port)
+            $networkStream = $tcpClient.GetStream()
 
-        # Wrap the network stream with an SSL stream
-        $sslStream = New-Object System.Net.Security.SslStream($networkStream, $false, { $true }) # Accepts any cert, change if needed
-        $sslStream.AuthenticateAsClient($Server)
+            # Wrap the network stream with an SSL stream
+            $sslStream = New-Object System.Net.Security.SslStream($networkStream, $false, { $true }) # Accepts any cert, change if needed
+            $sslStream.AuthenticateAsClient($Server)
 
-        # Convert message to bytes and send over SSL
-        $syslogBytes = [System.Text.Encoding]::UTF8.GetBytes($Message + "`n")
-        $sslStream.Write($syslogBytes, 0, $syslogBytes.Length)
-        $sslStream.Flush()
+            # Convert message to bytes and send over SSL
+            $syslogBytes = [System.Text.Encoding]::UTF8.GetBytes($Message + "`n")
+            $sslStream.Write($syslogBytes, 0, $syslogBytes.Length)
+            $sslStream.Flush()
 
-        # Close the stream and connection
-        $sslStream.Close()
-        $networkStream.Close()
-        $tcpClient.Close()
+            # Close the streams and connection
+            $sslStream.Close()
+            $networkStream.Close()
+            $tcpClient.Close()
+        }
+        else {
+            # Send over UDP
+            $udpClient = New-Object System.Net.Sockets.UdpClient
+            $syslogBytes = [System.Text.Encoding]::UTF8.GetBytes($Message)
+            $udpClient.Send($syslogBytes, $syslogBytes.Length, $Server, $Port) | Out-Null
+            $udpClient.Close()
+        }
 
-        Write-Host "Sent message to syslog over SSL: $Message"
+        Write-Host "Sent message to syslog over $Protocol`: $Message"
     }
     catch
     {
-        Write-Error "Failed to send message to syslog over SSL: $_"
+        Write-Error "Failed to send message to syslog over $Protocol`: $_"
     }
 }
 
@@ -339,7 +356,7 @@ foreach ($event in $eventHubMessages)
     {
         try
         {
-            SendToSyslogOverSSL -Message $syslogMessage -Server $syslogServer -Port $syslogPort
+            SendToSyslog -Message $syslogMessage -Server $syslogServer -Port $syslogPort -Protocol $protocol
         }
         catch
         {
