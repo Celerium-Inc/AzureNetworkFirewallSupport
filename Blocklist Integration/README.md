@@ -54,6 +54,9 @@ The function includes comprehensive error handling:
 
 ## Quick Start
 
+### NOTE
+These commands have only be ran via cloud shell
+
 1. Deploy using PowerShell:
 ```powershell
 ./deploy.ps1 `
