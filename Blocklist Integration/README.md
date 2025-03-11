@@ -9,6 +9,8 @@ Azure Function that manages IP blocklists in Azure Firewall using IP Groups and 
 - Support for both inbound and outbound blocking
 - Configurable group sizes and limits
 - Comprehensive error handling and logging
+- Secure service principal authentication
+- Custom role-based access control
 
 ## Configuration
 ### Required Environment Variables
@@ -37,11 +39,13 @@ Azure Function that manages IP blocklists in Azure Firewall using IP Groups and 
 ```http
 GET /api/blocklist?action=test&code={function_key}
 ```
+Tests connectivity and configuration.
 
 ### Update Blocklist
 ```http
 GET /api/blocklist?action=update&code={function_key}
 ```
+Fetches and updates blocked IPs.
 
 ### Unblock IPs
 ```http
@@ -55,6 +59,7 @@ Content-Type: application/json
     ]
 }
 ```
+Removes specified IPs from blocklist.
 
 ## Error Handling
 The function includes comprehensive error handling:
@@ -68,17 +73,16 @@ The function includes comprehensive error handling:
 - Azure subscription
 - Existing Azure Firewall and Firewall Policy
 - PowerShell 7.2 or later
-- Azure PowerShell module
+- Azure PowerShell modules:
+  - Az.Accounts
+  - Az.Resources
+  - Az.Storage
+  - Az.Functions
+  - Az.Network
 
 ## Quick Start
 
-1. Clone the repository:
-```bash
-git clone <repository-url>
-cd <repository-directory>
-```
-
-2. Deploy using PowerShell:
+1. Deploy using PowerShell:
 ```powershell
 ./deploy.ps1 `
     -ResourceGroupName "your-rg" `
@@ -93,7 +97,7 @@ cd <repository-directory>
     -BlocklistUrl "https://your-blocklist-url"
 ```
 
-3. Test the deployment:
+2. Test the deployment:
 ```powershell
 # Get your function key from Azure Portal > Function App > App keys
 $functionKey = "your-function-key"
@@ -118,6 +122,13 @@ Invoke-RestMethod "https://$functionApp.azurewebsites.net/api/blocklist?action=t
 - Request/response formats
 - Error handling
 - Implementation details
+
+### [Technical Overview](Overview.md)
+- Architecture details
+- Authentication flow
+- Error handling
+- Performance optimization
+- Security considerations
 
 ## Example Usage
 

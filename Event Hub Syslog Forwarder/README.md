@@ -1,10 +1,12 @@
 # Event Hub Syslog Forwarder
 
-Azure Function that forwards Event Hub messages to a Syslog server over SSL. This function processes various Azure log types including Flow Logs, DNS Queries, DNS Responses, and Firewall Logs.
+Azure Function that forwards Azure Event Hub messages to a Syslog server over SSL/UDP. This function processes various Azure log types including Flow Logs, DNS Queries, DNS Responses, and Firewall Logs.
 
 ## Features
 
-- Secure log forwarding via SSL/TLS
+- Secure log forwarding:
+  - SSL/TLS with certificate validation
+  - UDP for high-performance scenarios
 - Support for multiple log types:
   - Virtual Network Flow Logs
   - Azure Firewall DNS Query Logs
@@ -12,114 +14,123 @@ Azure Function that forwards Event Hub messages to a Syslog server over SSL. Thi
   - Azure Firewall Network/Application Rules Logs
 - Configurable syslog formatting
 - Detailed error handling and logging
+- High-volume log processing
+- Automatic retry logic
 
 ## Prerequisites
 
-- Azure Function App (PowerShell runtime)
+- Azure subscription
 - Event Hub namespace and Event Hub
-- Syslog server with SSL/TLS support
+- Syslog server with SSL/TLS or UDP support
 - Network connectivity between Function App and Syslog server
+- PowerShell 7.2 or later
+- Azure PowerShell modules:
+  - Az.Accounts
+  - Az.Resources
+  - Az.Storage
+  - Az.Functions
+  - Az.EventHub
 
 ## Setup
 
-1. Create an Azure Function App:
-   ```powershell
-   az functionapp create \
-     --name <function-app-name> \
-     --resource-group <resource-group> \
-     --runtime powershell \
-     --runtime-version 7.2 \
-     --functions-version 4 \
-     --os-type Windows
-   ```
+1. Deploy using PowerShell:
+```powershell
+./deploy.ps1 `
+    -ResourceGroupName "syslog-rg" `
+    -Location "eastus" `
+    -FunctionAppName "syslog-func" `
+    -StorageAccountName "sysstore" `
+    -EventHubNamespace "your-namespace" `
+    -EventHubName "your-eventhub" `
+    -SyslogServer "your-syslog-server" `
+    -SyslogPort "your-syslog-port" `
+    -Protocol "SSL"  # or "UDP"
+```
 
 2. Configure environment variables:
-   ```powershell
-   az functionapp config appsettings set \
-     --name <function-app-name> \
-     --resource-group <resource-group> \
-     --settings \
-       SYSLOG_SERVER=your-syslog-server \
-       SYSLOG_PORT=your-syslog-port
-   ```
-
-3. Deploy the function:
-   ```powershell
-   func azure functionapp publish <function-app-name>
-   ```
+```powershell
+az functionapp config appsettings set `
+    --name "syslog-func" `
+    --resource-group "syslog-rg" `
+    --settings `
+        SYSLOG_SERVER=your-syslog-server `
+        SYSLOG_PORT=your-syslog-port `
+        SYSLOG_PROTOCOL=SSL `
+        LOG_LEVEL=Information `
+        SSL_VERIFY_CERT=true
+```
 
 ## Configuration
 
-Required environment variables:
+### Required Environment Variables
 - `SYSLOG_SERVER`: Hostname/IP of your syslog server
 - `SYSLOG_PORT`: Port number for syslog server
+- `SYSLOG_PROTOCOL`: Protocol to use ("SSL" or "UDP")
 
-Optional environment variables:
+### Optional Environment Variables
 - `LOG_LEVEL`: Logging verbosity (Debug, Information, Warning, Error)
 - `SSL_VERIFY_CERT`: Whether to verify SSL certificates (true/false)
-
-The function will fail to start if required environment variables are not set.
+- `MAX_BATCH_SIZE`: Maximum number of logs to process in one batch
+- `RETRY_COUNT`: Number of retry attempts for failed transmissions
+- `RETRY_DELAY`: Delay in seconds between retries
 
 ## Log Types and Formatting
 
 ### 1. Flow Logs
+```
+<13>TimeGenerated=timestamp Type=FlowLog SrcIp=ip DstIp=ip Protocol=protocol Action=action ...
+```
 - Traffic flows through Network Security Groups
-- Includes source/destination IPs, ports, protocols
+- Source/destination IPs, ports, protocols
 - Flow timing and status information
 
 ### 2. DNS Query Logs
+```
+<13>TimeGenerated=timestamp Type=DnsQueryLog QueryName=name QueryType=type ResponseCode=code ...
+```
 - DNS queries processed by Azure Firewall
 - Query details (name, type, class)
 - Response information
 
 ### 3. DNS Response Logs
+```
+<13>TimeGenerated=timestamp Type=DnsResponseLog QueryName=name AnswerType=type AnswerData=data ...
+```
 - Detailed DNS response information
-- Answer records
+- Answer records with types and TTLs
 - Resolution paths and policies
 
 ### 4. Firewall Logs
+```
+<13>TimeGenerated=timestamp Type=FirewallLog SrcIp=ip DstIp=ip Action=action Rule=rule ...
+```
 - Traffic allowed/denied by firewall rules
 - Rule collection and policy information
 - Connection details
 
 ## Protocol Support
-- SSL/TLS (secure) - Use `forward-logs.ps1`
-- UDP (faster, less secure) - Use `forward-logs-using-udp.ps1`
 
-## Environment Variables
-| Variable | Required | Description | Default |
-|----------|----------|-------------|---------|
-| SYSLOG_SERVER | Yes | Hostname/IP of syslog server | - |
-| SYSLOG_PORT | Yes | Port number for syslog server | - |
-| LOG_LEVEL | No | Logging verbosity (Debug, Information, Warning, Error) | Information |
-| SSL_VERIFY_CERT | No | Whether to verify SSL certificates | true |
+### Protocol Selection
+The function supports both SSL/TLS and UDP protocols through the `SYSLOG_PROTOCOL` environment variable:
+```powershell
+# For SSL/TLS
+SYSLOG_PROTOCOL=SSL
 
-## Log Format
-All logs are formatted as key-value pairs with the following structure:
-```
-<priority>TimeGenerated=timestamp Type=logtype field1=value1 field2=value2 ...
+# For UDP
+SYSLOG_PROTOCOL=UDP
 ```
 
-### Supported Log Types
-1. Flow Logs (Type=FlowLog)
-2. DNS Query Logs (Type=DnsQueryLog)
-3. DNS Response Logs (Type=DnsResponseLog)
-4. Firewall Logs (Type=FirewallLog)
+### SSL/TLS Mode
+- Encrypted communication
+- Certificate validation (optional)
+- Higher latency but secure
+- Best for sensitive data or internet transmission
 
-## Troubleshooting
-
-1. Check function logs:
-   ```powershell
-   az functionapp logs tail \
-     --name <function-app-name> \
-     --resource-group <resource-group>
-   ```
-
-2. Common issues:
-   - Missing environment variables
-   - SSL/TLS certificate issues
-   - Network connectivity problems
-   - Event Hub trigger configuration
+### UDP Mode
+- Lower latency
+- No encryption
+- Higher throughput
+- Best for high-volume internal networks
 
 ## Monitoring
 
@@ -128,10 +139,35 @@ Monitor the function using:
 - Function execution logs
 - Syslog server logs
 
-## Support
+### Available Metrics
+- Log processing duration
+- Successful/failed transmissions
+- Batch sizes
+- Retry counts
+- Error rates
 
-For issues:
-1. Check function execution logs
-2. Verify environment variables
-3. Test network connectivity
-4. Review SSL/TLS configuration 
+## Troubleshooting
+
+1. Check function logs:
+```powershell
+az functionapp logs tail `
+    --name "syslog-func" `
+    --resource-group "syslog-rg"
+```
+
+2. Common issues:
+   - Missing environment variables
+   - SSL/TLS certificate issues
+   - Network connectivity problems
+   - Event Hub trigger configuration
+   - Syslog server capacity limits
+
+## Cleanup
+
+Remove all deployed resources:
+```powershell
+./cleanup.ps1 `
+    -ResourceGroupName "syslog-rg" `
+    -FunctionAppName "syslog-func" `
+    -StorageAccountName "sysstore"
+``` 
