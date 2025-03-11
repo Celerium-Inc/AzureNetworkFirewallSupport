@@ -5,8 +5,8 @@ Azure Function that forwards Azure Event Hub messages to a Syslog server over SS
 ## Features
 
 - Secure log forwarding:
-  - SSL/TLS with certificate validation
-  - UDP for high-performance scenarios
+  - SSL/TLS
+  - UDP
 - Support for multiple log types:
   - Virtual Network Flow Logs
   - Azure Firewall DNS Query Logs
@@ -50,8 +50,8 @@ Azure Function that forwards Azure Event Hub messages to a Syslog server over SS
 2. Configure environment variables:
 ```powershell
 az functionapp config appsettings set `
-    --name "temesxgn-syslog-func" `
-    --resource-group "temesxgn-syslog-rg" `
+    --name "syslog-func" `
+    --resource-group "syslog-rg" `
     --settings `
         SYSLOG_SERVER=your-syslog-server `
         SYSLOG_PORT=your-syslog-port `
@@ -110,18 +110,6 @@ SYSLOG_PROTOCOL=SSL
 # For UDP
 SYSLOG_PROTOCOL=UDP
 ```
-
-### SSL/TLS Mode
-- Encrypted communication
-- Certificate validation (optional)
-- Higher latency but secure
-- Best for sensitive data or internet transmission
-
-### UDP Mode
-- Lower latency
-- No encryption
-- Higher throughput
-- Best for high-volume internal networks
 
 ## Monitoring
 

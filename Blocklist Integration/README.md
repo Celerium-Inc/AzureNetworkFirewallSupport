@@ -33,34 +33,6 @@ Azure Function that manages IP blocklists in Azure Firewall using IP Groups and 
 - `RULE_PRIORITY`: Priority for firewall rules (default: 100)
 - `LOG_VERBOSITY`: Logging detail level (1=Basic, 2=Verbose)
 
-## API Endpoints
-
-### Test Connection
-```http
-GET /api/blocklist?action=test&code={function_key}
-```
-Tests connectivity and configuration.
-
-### Update Blocklist
-```http
-GET /api/blocklist?action=update&code={function_key}
-```
-Fetches and updates blocked IPs.
-
-### Unblock IPs
-```http
-POST /api/blocklist?action=unblock&code={function_key}
-Content-Type: application/json
-
-{
-    "ips": [
-        "1.1.1.1",
-        "2.2.2.2"
-    ]
-}
-```
-Removes specified IPs from blocklist.
-
 ## Error Handling
 The function includes comprehensive error handling:
 - Input validation
@@ -97,24 +69,15 @@ The function includes comprehensive error handling:
     -BlocklistUrl "https://your-blocklist-url"
 ```
 
-2. Test the deployment:
+2. Remove the function and its storage resources using PowerShell:
 ```powershell
-# Get your function key from Azure Portal > Function App > App keys
-$functionKey = "your-function-key"
-$functionApp = "your-func-name"
-
-# Test connectivity
-Invoke-RestMethod "https://$functionApp.azurewebsites.net/api/blocklist?action=test&code=$functionKey"
+./cleanup.ps1 `
+    -ResourceGroupName "your-rg" `
+    -FunctionAppName "your-func-name" `
+    -StorageAccountName "yourstorage"
 ```
 
 ## Documentation
-
-### [Setup Guide](Setup.md)
-- Prerequisites
-- Detailed deployment steps
-- Configuration options
-- Troubleshooting guide
-- Cleanup instructions
 
 ### [API Reference](API-Reference.md)
 - API endpoints and usage
@@ -122,45 +85,3 @@ Invoke-RestMethod "https://$functionApp.azurewebsites.net/api/blocklist?action=t
 - Request/response formats
 - Error handling
 - Implementation details
-
-### [Technical Overview](Overview.md)
-- Architecture details
-- Authentication flow
-- Error handling
-- Performance optimization
-- Security considerations
-
-## Example Usage
-
-### Update Blocklist
-```bash
-# Update blocklist from configured URL
-curl "https://$functionApp.azurewebsites.net/api/blocklist?action=update&code=$functionKey"
-```
-
-### Unblock IPs
-```bash
-# Unblock specific IPs
-curl "https://$functionApp.azurewebsites.net/api/blocklist?action=unblock&code=$functionKey" \
-  -X POST \
-  -H "Content-Type: application/json" \
-  -d '{
-    "ips": ["1.1.1.1", "2.2.2.2"]
-  }'
-```
-
-### Test Connection
-```bash
-# Test the function configuration and connectivity
-curl "https://$functionApp.azurewebsites.net/api/blocklist?action=test&code=$functionKey"
-```
-
-## Cleanup
-
-To remove the function and storage deployed resources:
-```powershell
-./cleanup.ps1 `
-    -ResourceGroupName "your-rg" `
-    -FunctionAppName "your-func-name" `
-    -StorageAccountName "yourstorage"
-```
