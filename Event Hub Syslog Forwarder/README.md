@@ -50,14 +50,12 @@ Azure Function that forwards Azure Event Hub messages to a Syslog server over SS
 2. Configure environment variables:
 ```powershell
 az functionapp config appsettings set `
-    --name "syslog-func" `
-    --resource-group "syslog-rg" `
+    --name "temesxgn-syslog-func" `
+    --resource-group "temesxgn-syslog-rg" `
     --settings `
         SYSLOG_SERVER=your-syslog-server `
         SYSLOG_PORT=your-syslog-port `
-        SYSLOG_PROTOCOL=SSL `
-        LOG_LEVEL=Information `
-        SSL_VERIFY_CERT=true
+        SYSLOG_PROTOCOL=SSL
 ```
 
 ## Configuration
@@ -66,13 +64,6 @@ az functionapp config appsettings set `
 - `SYSLOG_SERVER`: Hostname/IP of your syslog server
 - `SYSLOG_PORT`: Port number for syslog server
 - `SYSLOG_PROTOCOL`: Protocol to use ("SSL" or "UDP")
-
-### Optional Environment Variables
-- `LOG_LEVEL`: Logging verbosity (Debug, Information, Warning, Error)
-- `SSL_VERIFY_CERT`: Whether to verify SSL certificates (true/false)
-- `MAX_BATCH_SIZE`: Maximum number of logs to process in one batch
-- `RETRY_COUNT`: Number of retry attempts for failed transmissions
-- `RETRY_DELAY`: Delay in seconds between retries
 
 ## Log Types and Formatting
 
