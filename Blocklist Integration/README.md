@@ -55,9 +55,23 @@ The function includes comprehensive error handling:
 ## Quick Start
 
 ### NOTE
-These commands have only be ran via cloud shell
+These commands have only been run via cloud shell
 
-1. Deploy using PowerShell:
+1. Upload the content
+You will need to copy the powershell scripts deploy and clean,
+   as well as the full src folder.
+   With the following layout.
+   Else the scripts won't find the required contents.
+
+- deploy.ps1
+- cleanup.ps1
+- src
+  - function.json
+  - host.json
+  - requirements.psd1
+  - run.ps1
+
+2. Deploy using PowerShell:
 ```powershell
 ./deploy.ps1 `
     -ResourceGroupName "your-rg" `
@@ -72,7 +86,7 @@ These commands have only be ran via cloud shell
     -BlocklistUrl "https://your-blocklist-url"
 ```
 
-2. Remove the function and its storage resources using PowerShell:
+3. Remove the function and its storage resources using PowerShell:
 ```powershell
 ./cleanup.ps1 `
     -ResourceGroupName "your-rg" `
