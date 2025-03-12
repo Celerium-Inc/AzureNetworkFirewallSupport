@@ -30,12 +30,17 @@ Write-Host "Function triggered at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 Write-Host "Using Syslog Server: $syslogServer"
 Write-Host "Using Syslog Port: $syslogPort"
 Write-Host "Using Protocol: $protocol"
+Write-Host "Number of events received: $($eventHubMessages.Count)"
 
 if (-not $eventHubMessages)
 {
     Write-Host "No events received."
     return
 }
+
+# Debug: Log the type of the first message
+Write-Host "First message type: $($eventHubMessages[0].GetType().FullName)"
+Write-Host "First message content: $($eventHubMessages[0] | ConvertTo-Json -Depth 5)"
 
 # Counter for successfully processed events
 $successfullyProcessedCount = 0
@@ -123,23 +128,23 @@ foreach ($event in $eventHubMessages)
         # Log the raw event for debugging
         Write-Host "Processing event: $( $event | ConvertTo-Json -Depth 10 )"
 
-        # Check if the event is already a hashtable
-        if ($event -is [System.Management.Automation.OrderedHashtable])
-        {
-            $message = $event
-        }
-        else
-        {
-            # Try deserializing the JSON message
-            try
-            {
+        # Convert the event to a PowerShell object if it's not already
+        try {
+            if ($event -is [string]) {
                 $message = $event | ConvertFrom-Json
+            } else {
+                $message = $event
             }
-            catch
-            {
-                Write-Error "Failed to deserialize event: $( $event ) - Error: $_"
-                continue  # Skip this event and move to the next
-            }
+        }
+        catch {
+            Write-Error "Failed to process event: $( $event ) - Error: $_"
+            continue  # Skip this event and move to the next
+        }
+
+        # Ensure we have records to process
+        if (-not $message.records) {
+            Write-Error "No records found in message"
+            continue
         }
 
         # Process each record based on log type

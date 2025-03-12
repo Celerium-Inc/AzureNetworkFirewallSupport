@@ -18,6 +18,13 @@ Write-Host "Resource Group: $ResourceGroupName"
 Write-Host "Function App: $FunctionAppName"
 Write-Host "Storage Account: $StorageAccountName"
 
+# Prompt for confirmation
+$confirmation = Read-Host "Are you sure you want to delete these resources? (y/n)"
+if ($confirmation -ne 'y') {
+    Write-Host "Cleanup cancelled by user"
+    exit 0
+}
+
 # Function to ensure we have a valid Azure context
 function Ensure-AzureConnection {
     try {

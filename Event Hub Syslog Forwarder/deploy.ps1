@@ -13,16 +13,16 @@ param(
     [string]$StorageAccountName,
 
     [Parameter(Mandatory = $true)]
-    [string]$EventHubNamespace,
+    [string]$SyslogServer,
+
+    [Parameter(Mandatory = $true)]
+    [int]$SyslogPort,
 
     [Parameter(Mandatory = $true)]
     [string]$EventHubName,
 
     [Parameter(Mandatory = $true)]
-    [string]$SyslogServer,
-
-    [Parameter(Mandatory = $true)]
-    [int]$SyslogPort,
+    [string]$EventHubConnection,
 
     [Parameter(Mandatory = $false)]
     [ValidateSet("SSL", "UDP")]
@@ -32,24 +32,6 @@ param(
 # Error handling
 $ErrorActionPreference = 'Stop'
 
-# Helper function to get publishing credentials
-function Get-AzWebAppPublishingCredentials {
-    param(
-        [string]$ResourceGroupName,
-        [string]$Name
-    )
-    
-    $resourceType = "Microsoft.Web/sites/config"
-    $resourceName = "$Name/publishingcredentials"
-    
-    Invoke-AzResourceAction `
-        -ResourceGroupName $ResourceGroupName `
-        -ResourceType $resourceType `
-        -ResourceName $resourceName `
-        -Action list `
-        -Force
-}
-
 # Verify Azure connection
 try {
     $context = Get-AzContext
@@ -57,8 +39,7 @@ try {
         Write-Host "Please login to Azure..."
         Connect-AzAccount -UseDeviceAuthentication
     }
-    $subscriptionId = $context.Subscription.Id
-    Write-Host "Using subscription: $($context.Subscription.Name) ($subscriptionId)"
+    Write-Host "Using subscription: $($context.Subscription.Name) ($($context.Subscription.Id))"
 }
 catch {
     Write-Host "Please login to Azure..."
@@ -82,26 +63,6 @@ if (-not $storageAccount) {
         -SkuName Standard_LRS
 }
 
-# Create Event Hub Namespace
-Write-Host "Creating Event Hub Namespace..."
-$ehNamespace = Get-AzEventHubNamespace -ResourceGroupName $ResourceGroupName -Name $EventHubNamespace -ErrorAction SilentlyContinue
-if (-not $ehNamespace) {
-    $ehNamespace = New-AzEventHubNamespace -ResourceGroupName $ResourceGroupName `
-        -Name $EventHubNamespace `
-        -Location $Location `
-        -SkuName Standard
-}
-
-# Create Event Hub
-Write-Host "Creating Event Hub..."
-$eventHub = Get-AzEventHub -ResourceGroupName $ResourceGroupName -Namespace $EventHubNamespace -Name $EventHubName -ErrorAction SilentlyContinue
-if (-not $eventHub) {
-    $eventHub = New-AzEventHub -ResourceGroupName $ResourceGroupName `
-        -Namespace $EventHubNamespace `
-        -Name $EventHubName `
-        -MessageRetentionInDays 1
-}
-
 # Create Function App
 Write-Host "Creating Function App..."
 $functionApp = New-AzFunctionApp -ResourceGroupName $ResourceGroupName `
@@ -116,12 +77,13 @@ $functionApp = New-AzFunctionApp -ResourceGroupName $ResourceGroupName `
 # Configure environment variables
 Write-Host "Configuring environment variables..."
 $settings = @{
-    "EVENTHUB_CONNECTION" = (Get-AzEventHubKey -ResourceGroupName $ResourceGroupName `
-        -Namespace $EventHubNamespace `
-        -Name "RootManageSharedAccessKey").PrimaryConnectionString
     "SYSLOG_SERVER" = $SyslogServer
     "SYSLOG_PORT" = $SyslogPort
-    "PROTOCOL" = $Protocol
+    "SYSLOG_PROTOCOL" = $Protocol
+    "EVENT_HUB_NAME" = $EventHubName
+    "EVENTHUB_CONNECTION" = $EventHubConnection
+    "FUNCTIONS_WORKER_RUNTIME" = "powershell"
+    "WEBSITE_RUN_FROM_PACKAGE" = "0"
 }
 
 Update-AzFunctionAppSetting -Name $FunctionAppName -ResourceGroupName $ResourceGroupName -AppSetting $settings
@@ -130,32 +92,68 @@ Update-AzFunctionAppSetting -Name $FunctionAppName -ResourceGroupName $ResourceG
 Write-Host "Deploying function code..."
 
 try {
-    # Create temporary deployment folder
-    $tempPath = Join-Path $env:TEMP "EventHubSyslogForwarder"
-    New-Item -ItemType Directory -Path $tempPath -Force | Out-Null
-
-    # Copy function files
-    Copy-Item "src/forward-logs.ps1" -Destination "$tempPath/run.ps1"
-    Copy-Item "src/function.json" -Destination "$tempPath/function.json"
-    Copy-Item "src/host.json" -Destination "$tempPath/host.json"
-
-    # Create zip file
-    Compress-Archive -Path "$tempPath/*" -DestinationPath "$tempPath/function.zip" -Force
-
+    # Get the script's directory
+    $scriptPath = $PSScriptRoot
+    if (-not $scriptPath) {
+        $scriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
+    }
+    
+    # Verify source files exist
+    $srcPath = Join-Path $scriptPath "src"
+    Write-Host "Source path: $srcPath"
+    
+    # Create the function in the portal
+    $functionPath = "D:\home\site\wwwroot\EventHubTrigger"
+    
     # Get publishing credentials
-    $publishingCredentials = Get-AzWebAppPublishingCredentials -ResourceGroupName $ResourceGroupName -Name $FunctionAppName
-    $base64Auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $publishingCredentials.Properties.PublishingUserName, $publishingCredentials.Properties.PublishingPassword)))
+    $publishingCredentials = Invoke-AzResourceAction -ResourceGroupName $ResourceGroupName `
+        -ResourceType Microsoft.Web/sites/config `
+        -ResourceName "$FunctionAppName/publishingcredentials" `
+        -Action list -Force
 
-    # Deploy using Kudu API
-    $apiUrl = "https://$FunctionAppName.scm.azurewebsites.net/api/zipdeploy"
-    $filePath = "$tempPath/function.zip"
+    $username = $publishingCredentials.Properties.PublishingUserName
+    $password = $publishingCredentials.Properties.PublishingPassword
+    $base64Auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$($username):$($password)"))
+    $apiUrl = "https://$FunctionAppName.scm.azurewebsites.net/api/vfs"
 
-    Invoke-RestMethod -Uri $apiUrl -Headers @{Authorization=("Basic {0}" -f $base64Auth)} -Method POST -InFile $filePath -ContentType "multipart/form-data"
+    # Create function directory
+    Write-Host "Creating function directory..."
+    Invoke-RestMethod -Uri "$apiUrl/site/wwwroot/EventHubTrigger/" `
+        -Headers @{Authorization="Basic $base64Auth"} `
+        -Method PUT
 
-    # Cleanup temporary files
-    Remove-Item -Path $tempPath -Recurse -Force
+    # Upload each file individually
+    Write-Host "Uploading function files..."
+    
+    # Upload function.json
+    $functionJson = Get-Content -Path (Join-Path $srcPath "function.json") -Raw
+    Invoke-RestMethod -Uri "$apiUrl/site/wwwroot/EventHubTrigger/function.json" `
+        -Headers @{Authorization="Basic $base64Auth"} `
+        -Method PUT `
+        -Body $functionJson `
+        -ContentType "application/json"
+
+    # Upload run.ps1
+    $runPs1 = Get-Content -Path (Join-Path $srcPath "forward-logs.ps1") -Raw
+    Invoke-RestMethod -Uri "$apiUrl/site/wwwroot/EventHubTrigger/run.ps1" `
+        -Headers @{Authorization="Basic $base64Auth"} `
+        -Method PUT `
+        -Body $runPs1 `
+        -ContentType "text/plain"
+
+    # Upload host.json to root
+    $hostJson = Get-Content -Path (Join-Path $srcPath "host.json") -Raw
+    Invoke-RestMethod -Uri "$apiUrl/site/wwwroot/host.json" `
+        -Headers @{Authorization="Basic $base64Auth"} `
+        -Method PUT `
+        -Body $hostJson `
+        -ContentType "application/json"
 
     Write-Host "Function code deployed successfully"
+    
+    # Restart the Function App
+    Write-Host "Restarting Function App..."
+    Restart-AzFunctionApp -Name $FunctionAppName -ResourceGroupName $ResourceGroupName -Force
 }
 catch {
     Write-Host "Failed to deploy function code: $_" -ForegroundColor Red
@@ -166,7 +164,8 @@ Write-Host "`nDeployment completed!"
 Write-Host "`nFunction App Details:"
 Write-Host "Name: $FunctionAppName"
 Write-Host "URL: https://$FunctionAppName.azurewebsites.net"
-Write-Host "Event Hub: $EventHubName"
 Write-Host "Syslog Server: $SyslogServer"
 Write-Host "Syslog Port: $SyslogPort"
-Write-Host "Protocol: $Protocol" 
+Write-Host "Protocol: $Protocol"
+Write-Host "Event Hub Name: $EventHubName"
+Write-Host "Event Hub Connection: [Hidden for security]" 

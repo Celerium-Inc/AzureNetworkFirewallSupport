@@ -4,8 +4,8 @@
       "type": "eventHubTrigger",
       "name": "eventHubMessages",
       "direction": "in",
-      "eventHubName": "test-fw-event-hub",
-      "connection": "test-fw-event-hub-namespace_RootManageSharedAccessKey_EVENTHUB",
+      "eventHubName": "EVENT_HUB_NAME",
+      "connection": "EVENTHUB_CONNECTION",
       "cardinality": "many",
       "consumerGroup": "$Default"
     }
