@@ -134,7 +134,7 @@ try {
         -ContentType "application/json"
 
     # Upload run.ps1
-    $runPs1 = Get-Content -Path (Join-Path $srcPath "forward-logs.ps1") -Raw
+    $runPs1 = Get-Content -Path (Join-Path $srcPath "run.ps1") -Raw
     Invoke-RestMethod -Uri "$apiUrl/site/wwwroot/EventHubTrigger/run.ps1" `
         -Headers @{Authorization="Basic $base64Auth"} `
         -Method PUT `

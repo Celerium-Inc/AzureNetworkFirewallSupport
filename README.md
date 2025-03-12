@@ -47,7 +47,6 @@ Azure Function that forwards Azure Event Hub messages to a Syslog server over SS
 │   └── API-Reference.md            # API documentation
 ├── Event Hub Syslog Forwarder/     # Syslog Forwarder
 │   ├── src/                        # Source code directory
-│   │   └── forward-logs.ps1        # Syslog forwarder (SSL/TLS & UDP)
 │   ├── deploy.ps1                  # Deployment script
 │   ├── cleanup.ps1                 # Resource cleanup script
 │   └── README.md                   # Implementation details

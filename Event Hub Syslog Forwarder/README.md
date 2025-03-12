@@ -41,6 +41,18 @@ Azure Function that forwards Azure Event Hub messages to a Syslog server over SS
      3. Select a policy (e.g., "RootManageSharedAccessKey" or create a new one with Manage permissions)
      4. Copy the "Connection string-primary key"
 
+2. Upload the content
+You will need to copy the powershell scripts deploy and clean,
+as well as the full src folder.
+With the following layout.
+Else the scripts won't find the required contents.
+
+   - deploy.ps1
+   - cleanup.ps1
+   - src
+       - function.json
+       - run.ps1
+
 2. Deploy using PowerShell:
 ```powershell
 ./deploy.ps1 `
