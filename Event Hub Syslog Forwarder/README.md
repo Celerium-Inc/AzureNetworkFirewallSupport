@@ -51,6 +51,7 @@ Else the scripts won't find the required contents.
    - cleanup.ps1
    - src
        - function.json
+       - host.json
        - run.ps1
 
 2. Deploy using PowerShell:
