@@ -43,7 +43,6 @@ Azure Function that forwards Azure Event Hub messages to a Syslog server over SS
 │   ├── deploy.ps1                  # Deployment script
 │   ├── cleanup.ps1                 # Resource cleanup script
 │   ├── README.md                   # Implementation details
-│   ├── Setup.md                    # Setup instructions
 │   └── API-Reference.md            # API documentation
 ├── Event Hub Syslog Forwarder/     # Syslog Forwarder
 │   ├── src/                        # Source code directory
@@ -68,13 +67,12 @@ Azure Function that forwards Azure Event Hub messages to a Syslog server over SS
 ## Quick Start
 
   Choose your component:
-   - For IP Blocklist Integration: [Setup Guide](Blocklist%20Integration/Setup.md)
+   - For IP Blocklist Integration: [Setup Guide](Blocklist%20Integration/README.md)
    - For Event Hub Syslog Forwarder: [Setup Guide](Event%20Hub%20Syslog%20Forwarder/README.md)
 
 ## Documentation
 
 - [Blocklist Integration](Blocklist%20Integration/README.md)
-  - [Setup Guide](Blocklist%20Integration/Setup.md)
   - [API Reference](Blocklist%20Integration/API-Reference.md)
 
 - [Event Hub Syslog Forwarder](Event%20Hub%20Syslog%20Forwarder/README.md)
