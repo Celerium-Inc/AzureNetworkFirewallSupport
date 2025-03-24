@@ -110,8 +110,11 @@ GET /api/blocklist?action=update&code={function_key}
 1. Fetches IP list from configured blocklist URL
 2. Validates each IP address
 3. Splits IPs into groups (respecting MAX_IPS_PER_GROUP limit)
-4. Creates or updates IP Groups for each batch
-5. Updates Firewall Policy rules to use these IP Groups
+4. Optimizes IP Group management:
+   - Reuses existing groups where possible
+   - Creates new groups only when needed
+   - Removes only unused groups
+5. Updates Firewall Policy rules to use active IP Groups
 6. Creates both inbound and outbound blocking rules
 
 #### IP Processing
@@ -123,130 +126,66 @@ GET /api/blocklist?action=update&code={function_key}
   - MAX_IPS_PER_GROUP
   - MAX_IP_GROUPS
 
-#### IP Group Mapping
-1. **Group Naming**
+#### IP Group Management
+1. **Optimized Group Handling**
+   - Existing groups are reused when possible
+   - Groups are updated in place to minimize API calls
+   - Only unused groups are deleted
+   - Atomic updates ensure consistency
+
+2. **Group Naming**
    - Base name: `fw-blocklist` (configurable)
    - Numbered sequentially: `fw-blocklist-001`, `fw-blocklist-002`, etc.
    - Maximum groups determined by MAX_IP_GROUPS setting
 
-2. **IP Distribution**
+3. **Update Process**
    ```
-   Example with 12,000 IPs:
-   MAX_IPS_PER_GROUP = 5000
-   MAX_IP_GROUPS = 10
-
-   Result:
-   fw-blocklist-001: 5000 IPs
-   fw-blocklist-002: 5000 IPs
-   fw-blocklist-003: 2000 IPs
+   Example with 12,000 IPs and existing groups:
+   - Existing: fw-blocklist-001 (5000 IPs)
+   - Existing: fw-blocklist-002 (5000 IPs)
+   - Existing: fw-blocklist-003 (3000 IPs)
+   
+   New distribution needed:
+   - Update fw-blocklist-001 with new 5000 IPs
+   - Update fw-blocklist-002 with new 5000 IPs
+   - Update fw-blocklist-003 with new 2000 IPs
    ```
-
-3. **Rule Collection Mapping**
-   ```json
-   {
-     "ruleCollections": [
-       {
-         "name": "Blocked-IP-Collection",
-         "priority": 100,
-         "ruleCollectionType": "FirewallPolicyFilterRuleCollection",
-         "action": { "type": "Deny" },
-         "rules": [
-           {
-             "name": "blocked-IPs-outbound",
-             "ruleType": "NetworkRule",
-             "ipProtocols": ["Any"],
-             "sourceAddresses": ["*"],
-             "destinationIpGroups": [
-               "/subscriptions/.../ipGroups/fw-blocklist-001",
-               "/subscriptions/.../ipGroups/fw-blocklist-002",
-               "/subscriptions/.../ipGroups/fw-blocklist-003"
-             ],
-             "destinationPorts": ["*"]
-           },
-           {
-             "name": "blocked-IPs-inbound",
-             "ruleType": "NetworkRule",
-             "ipProtocols": ["Any"],
-             "sourceIpGroups": [
-               "/subscriptions/.../ipGroups/fw-blocklist-001",
-               "/subscriptions/.../ipGroups/fw-blocklist-002",
-               "/subscriptions/.../ipGroups/fw-blocklist-003"
-             ],
-             "destinationAddresses": ["*"],
-             "destinationPorts": ["*"]
-           }
-         ]
-       }
-     ]
-   }
-   ```
-
-4. **Update Process**
-   - Existing groups are updated in place if possible
-   - New groups are created if needed
-   - Empty groups are automatically deleted
-   - Updates are atomic within each group
-   - Rule Collection is updated only after all groups are ready
 
 #### Example Response
 ```json
 {
     "status": "success",
-    "message": "Firewall policy updated successfully",
+    "message": "Successfully updated IP groups",
     "timestamp": "2024-03-05T18:28:15Z",
     "details": {
-        "ipGroupIds": [
-            "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/your-rg/providers/Microsoft.Network/ipGroups/fw-blocklist-001",
-            "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/your-rg/providers/Microsoft.Network/ipGroups/fw-blocklist-002"
+        "groupsCreated": [
+            {
+                "id": "/subscriptions/.../ipGroups/fw-blocklist-003",
+                "name": "fw-blocklist-003",
+                "count": 2000,
+                "isNew": true
+            }
         ],
-        "ruleCollectionGroup": {
-            "name": "CeleriumRuleCollectionGroup",
-            "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/your-rg/providers/Microsoft.Network/firewallPolicies/your-policy/ruleCollectionGroups/CeleriumRuleCollectionGroup",
-            "priority": 100,
-            "ruleCollections": [
-                {
-                    "name": "Blocked-IP-Collection",
-                    "priority": 100,
-                    "ruleCollectionType": "FirewallPolicyFilterRuleCollection",
-                    "action": {
-                        "type": "Deny"
-                    },
-                    "rules": [
-                        {
-                            "name": "blocked-IPs-outbound",
-                            "ruleType": "NetworkRule",
-                            "ipProtocols": ["Any"],
-                            "sourceAddresses": ["*"],
-                            "destinationIpGroups": [
-                                "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/your-rg/providers/Microsoft.Network/ipGroups/fw-blocklist-001",
-                                "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/your-rg/providers/Microsoft.Network/ipGroups/fw-blocklist-002"
-                            ],
-                            "destinationPorts": ["*"]
-                        },
-                        {
-                            "name": "blocked-IPs-inbound",
-                            "ruleType": "NetworkRule",
-                            "ipProtocols": ["Any"],
-                            "sourceIpGroups": [
-                                "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/your-rg/providers/Microsoft.Network/ipGroups/fw-blocklist-001",
-                                "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/your-rg/providers/Microsoft.Network/ipGroups/fw-blocklist-002"
-                            ],
-                            "destinationAddresses": ["*"],
-                            "destinationPorts": ["*"]
-                        }
-                    ]
-                }
-            ]
-        },
-        "totalIpsProcessed": 1000,
-        "groupsCreated": 2,
-        "ipsPerGroup": [500, 500],
-        "requestInfo": {
-           "blocklistUrl": "https://url/blocklist/00000000-0000-0000-0000-000000000000",
-           "maxTotalIps": 50000,
-            "maxIpsPerGroup": 5000,
-            "maxIpGroups": 10
-        }
+        "groupsUpdated": [
+            {
+                "id": "/subscriptions/.../ipGroups/fw-blocklist-001",
+                "name": "fw-blocklist-001",
+                "count": 5000,
+                "isNew": false
+            },
+            {
+                "id": "/subscriptions/.../ipGroups/fw-blocklist-002",
+                "name": "fw-blocklist-002",
+                "count": 5000,
+                "isNew": false
+            }
+        ],
+        "groupsDeleted": [
+            {
+                "name": "fw-blocklist-004"
+            }
+        ],
+        "totalIps": 12000
     }
 }
 ```

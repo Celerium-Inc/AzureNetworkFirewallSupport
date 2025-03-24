@@ -11,27 +11,43 @@ Azure Function that manages IP blocklists in Azure Firewall using IP Groups and 
 - Comprehensive error handling and logging
 - Secure service principal authentication
 - Custom role-based access control
-- Automatic IP group management
-- Empty groups are automatically deleted
+- Optimized IP group management
+  - Reuses existing groups when possible
+  - Updates groups in place to minimize API calls
+  - Only deletes unused groups
 - Efficient IP distribution across groups
 
 ## IP Group Management
 
 ### Group Creation and Updates
 - IP groups are created and updated as needed
-- Empty groups are automatically deleted
+- Existing groups are reused when possible to minimize API operations
+- Only unused groups are deleted
 - Groups are named using sequential numbers (e.g., fw-blocklist-001, fw-blocklist-002)
 - Groups can contain any number of IPs, from 1 to MAX_IPS_PER_GROUP
 
 ### Group Management Strategy
-```powershell
-# Groups are deleted when empty
-if ($remainingIps.Count -eq 0) {
-    Remove-IpGroup -IpGroupName $groupName
-}
+The function uses an optimized approach:
+1. First removes IP group references from firewall rules
+2. Calculates required groups for current IPs
+3. Updates existing groups where possible
+4. Creates new groups only when needed
+5. Deletes only unused groups
+6. Updates firewall rules with final group configuration
 
-# Groups are numbered sequentially
-$groupName = "$baseIpGroupName-{0:D3}" -f ($groupIndex + 1)
+### Example Group Update Process
+```
+Initial state:
+fw-blocklist-001 (5000 IPs)
+fw-blocklist-002 (5000 IPs)
+fw-blocklist-003 (3000 IPs)
+fw-blocklist-004 (2000 IPs)
+
+New IP distribution needed (12000 IPs):
+1. Update fw-blocklist-001 with new 5000 IPs
+2. Update fw-blocklist-002 with new 5000 IPs
+3. Update fw-blocklist-003 with new 2000 IPs
+4. Delete fw-blocklist-004 (no longer needed)
 ```
 
 ### Configuration Options
@@ -64,8 +80,9 @@ The function provides detailed logging about IP group operations:
 ```powershell
 # Log format examples:
 "2024-03-21 16:45:23 [Information] Found 3 IP Groups matching pattern 'fw-blocklist-*'"
-"2024-03-21 16:45:24 [Verbose] - fw-blocklist-001: 4500 IPs"
-"2024-03-21 16:45:24 [Warning] Group is empty, deleting group fw-blocklist-002"
+"2024-03-21 16:45:24 [Information] Updating existing group fw-blocklist-001 with 5000 IPs"
+"2024-03-21 16:45:25 [Information] Creating new group fw-blocklist-003 with 2000 IPs"
+"2024-03-21 16:45:26 [Information] Deleting unused group fw-blocklist-004"
 ```
 
 #### Monitoring Points
