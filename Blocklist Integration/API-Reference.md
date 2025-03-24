@@ -184,7 +184,7 @@ GET /api/blocklist?action=update&code={function_key}
 4. **Update Process**
    - Existing groups are updated in place if possible
    - New groups are created if needed
-   - Empty groups are filled with placeholder IP (0.0.0.0/32)
+   - Empty groups are automatically deleted
    - Updates are atomic within each group
    - Rule Collection is updated only after all groups are ready
 
@@ -278,7 +278,7 @@ Content-Type: application/json
 #### IP Handling
 - Matches IPs with or without CIDR notation
 - Maintains original CIDR format for remaining IPs
-- Adds placeholder IP (0.0.0.0/32) if group would be empty
+- Deletes groups that become empty
 - Updates all affected groups atomically
 
 #### Example Response
@@ -290,59 +290,22 @@ Content-Type: application/json
     "details": {
         "updatedGroups": [
             {
+                "id": "/subscriptions/.../ipGroups/fw-blocklist-001",
                 "name": "fw-blocklist-001",
-                "removedCount": 2,
-                "remainingCount": 498,
-                "ipAddresses": [
-                    "3.3.3.3/32",
-                    "4.4.4.4/32",
-                    // ... remaining IPs
-                ]
+                "removedCount": 5,
+                "remainingCount": 4495
             }
         ],
-        "ruleCollectionGroup": {
-            "name": "CeleriumRuleCollectionGroup",
-            "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/your-rg/providers/Microsoft.Network/firewallPolicies/your-policy/ruleCollectionGroups/CeleriumRuleCollectionGroup",
-            "priority": 100,
-            "ruleCollections": [
-                {
-                    "name": "Blocked-IP-Collection",
-                    "priority": 100,
-                    "ruleCollectionType": "FirewallPolicyFilterRuleCollection",
-                    "action": {
-                        "type": "Deny"
-                    },
-                    "rules": [
-                        {
-                            "name": "blocked-IPs-outbound",
-                            "ruleType": "NetworkRule",
-                            "ipProtocols": ["Any"],
-                            "sourceAddresses": ["*"],
-                            "destinationIpGroups": [
-                                "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/your-rg/providers/Microsoft.Network/ipGroups/fw-blocklist-001"
-                            ],
-                            "destinationPorts": ["*"]
-                        },
-                        {
-                            "name": "blocked-IPs-inbound",
-                            "ruleType": "NetworkRule",
-                            "ipProtocols": ["Any"],
-                            "sourceIpGroups": [
-                                "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/your-rg/providers/Microsoft.Network/ipGroups/fw-blocklist-001"
-                            ],
-                            "destinationAddresses": ["*"],
-                            "destinationPorts": ["*"]
-                        }
-                    ]
-                }
-            ]
-        },
-        "unblocked": ["1.1.1.1", "2.2.2.2"],
-        "requestInfo": {
-            "providedIps": ["1.1.1.1", "2.2.2.2"],
-            "validIps": ["1.1.1.1", "2.2.2.2"],
-            "invalidCount": 0
-        }
+        "deletedGroups": [
+            {
+                "name": "fw-blocklist-002",
+                "removedCount": 3200
+            }
+        ],
+        "unblocked": [
+            "192.168.1.1",
+            "10.0.0.1"
+        ]
     }
 }
 ```

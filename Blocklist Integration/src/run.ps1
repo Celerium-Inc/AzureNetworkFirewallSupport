@@ -46,6 +46,9 @@ $script:jsonSettings = [Newtonsoft.Json.JsonSerializerSettings]@{
     MaxDepth = 10
 }
 
+# Global API version for all Azure REST API calls
+$script:apiVersion = "2024-01-01"
+
 # Logging function with verbosity levels
 function Write-FunctionLog {
     param(
@@ -137,6 +140,8 @@ function Split-IpsIntoGroups {
         [int]$MaxGroups
     )
 
+    Write-FunctionLog "Splitting $($IpList.Count) IPs into groups" -Level "Verbose"
+    
     $groups = @()
     $totalGroups = [Math]::Min([Math]::Ceiling($IpList.Count / $MaxIpsPerGroup), $MaxGroups)
 
@@ -145,7 +150,9 @@ function Split-IpsIntoGroups {
         $endIndex = [Math]::Min(($i + 1) * $MaxIpsPerGroup - 1, $IpList.Count - 1)
 
         if ($startIndex -lt $IpList.Count) {
-            $groups += ,@($IpList[$startIndex..$endIndex])
+            $groupIps = @($IpList[$startIndex..$endIndex])
+            Write-FunctionLog "Created group $($i + 1) with $($groupIps.Count) IPs" -Level "Verbose"
+            $groups += ,$groupIps
         }
     }
 
@@ -184,37 +191,41 @@ function Update-IpGroup {
         }
 
         $baseUrl = "https://management.azure.com"
-        $apiVersion = "2024-01-01"
+        $ipGroupApiVersion = "2024-07-01"  # Updated to a supported API version
         $url = "$baseUrl/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.Network/ipGroups/$IpGroupName"
 
-        # Try to get existing IP Group first to get location
-        try {
-            Write-FunctionLog "Getting existing IP Group location..." -Level "Verbose"
-            $existingGroup = Invoke-AzureRestMethod -Method Get -Uri "$url`?api-version=$apiVersion" `
-                -Headers @{ "Authorization" = "Bearer $Token" }
-            $Location = $existingGroup.location
-            Write-FunctionLog "Using existing IP Group location: $Location" -Level "Verbose"
-        }
-        catch {
-            # Check if it's a 404 (not found) error
-            if ($_.Exception.Response.StatusCode.value__ -eq 404) {
-                Write-FunctionLog "IP Group not found, getting location from resource group..." -Level "Verbose"
-                $rgUrl = "$baseUrl/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup?api-version=$apiVersion"
-                try {
-                    $rg = Invoke-AzureRestMethod -Method Get -Uri $rgUrl `
-                        -Headers @{ "Authorization" = "Bearer $Token" }
+        # Get location only if not provided
+        if (-not $Location) {
+            Write-FunctionLog "Getting location for IP Group..." -Level "Verbose"
+            try {
+                # Try to get existing IP Group first
+                $existingGroup = Invoke-RestMethod -Method Get -Uri "$url`?api-version=$ipGroupApiVersion" `
+                    -Headers @{ "Authorization" = "Bearer $Token" } `
+                    -ErrorAction Stop
+                $Location = $existingGroup.location
+                Write-FunctionLog "Using existing IP Group location: $Location" -Level "Verbose"
+            }
+            catch {
+                # If IP Group doesn't exist, get location from resource group
+                if ($_.Exception.Response.StatusCode.value__ -eq 404) {
+                    Write-FunctionLog "IP Group not found, getting location from resource group..." -Level "Verbose"
+                    $rgUrl = "$baseUrl/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup"
+                    $rg = Invoke-RestMethod -Method Get -Uri "$rgUrl`?api-version=2024-07-01" `
+                        -Headers @{ "Authorization" = "Bearer $Token" } `
+                        -ErrorAction Stop
                     $Location = $rg.location
                     Write-FunctionLog "Using resource group location: $Location" -Level "Verbose"
                 }
-                catch {
-                    Write-FunctionLog "Failed to get resource group location: $_" -Level "Error"
+                else {
+                    Write-FunctionLog "Failed to get IP Group: $_" -Level "Error"
                     throw
                 }
             }
-            else {
-                Write-FunctionLog "Failed to get IP Group: $_" -Level "Error"
-                throw
-            }
+        }
+
+        # Validate location is not null
+        if (-not $Location) {
+            throw "Unable to determine location for IP Group"
         }
 
         $body = @{
@@ -224,23 +235,38 @@ function Update-IpGroup {
             }
         }
 
-        Write-FunctionLog "Request body: $($body | ConvertTo-Json)" -Level "Verbose"
+        Write-FunctionLog "Request URL: $url" -Level "Verbose"
+        Write-FunctionLog "Request body: $($body | ConvertTo-Json -Depth 10)" -Level "Verbose"
 
         # Make API call with retries
-        $result = Invoke-AzureRestMethod -Method Put -Uri "$url`?api-version=$apiVersion" `
+        $result = Invoke-RestMethod -Method Put -Uri "$url`?api-version=$ipGroupApiVersion" `
             -Headers @{
                 "Authorization" = "Bearer $Token"
                 "Content-Type" = "application/json"
             } `
             -Body ($body | ConvertTo-Json -Compress -Depth 10) `
-            -MaxRetries 5 `
-            -RetryDelay 10
+            -ContentType "application/json"
 
+        Write-FunctionLog "IP Group update successful" -Level "Verbose"
         return $result
     }
     catch {
-        Write-FunctionLog "Update-IpGroup failed: $_" -Level "Error"
-        throw
+        $errorDetails = ""
+        try {
+            $errorDetails = $_.ErrorDetails.Message
+            if (-not $errorDetails) {
+                $rawError = $_.Exception.Response.GetResponseStream()
+                $reader = New-Object System.IO.StreamReader($rawError)
+                $errorDetails = $reader.ReadToEnd()
+                $reader.Close()
+            }
+        }
+        catch {
+            $errorDetails = $_.Exception.Message
+        }
+
+        Write-FunctionLog "Update-IpGroup failed with details: $errorDetails" -Level "Error"
+        throw "Failed to update IP Group: $errorDetails"
     }
 }
 
@@ -275,14 +301,14 @@ function Update-RuleCollectionGroup {
         [string]$ResourceGroup,
         [Parameter(Mandatory = $true)]
         [string]$FirewallPolicyName,
-        [Parameter(Mandatory = $true)]
-        [string[]]$IpGroupIds
+        [Parameter(Mandatory = $false)]
+        [string[]]$IpGroupIds = @()
     )
 
     $baseUrl = "https://management.azure.com"
-    $apiVersion = "2024-01-01"
     $url = "$baseUrl/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.Network/firewallPolicies/$FirewallPolicyName/ruleCollectionGroups/$ruleCollectionGroupName"
 
+    # Modify the body to handle empty IpGroupIds
     $body = @{
         properties = @{
             priority = $rulePriority
@@ -290,24 +316,7 @@ function Update-RuleCollectionGroup {
                 @{
                     ruleCollectionType = "FirewallPolicyFilterRuleCollection"
                     action = @{ type = "Deny" }
-                    rules = @(
-                        @{
-                            ruleType = "NetworkRule"
-                            name = "blocked-IPs-outbound"
-                            ipProtocols = @("Any")
-                            sourceAddresses = @("*")
-                            destinationIpGroups = @($IpGroupIds)
-                            destinationPorts = @("*")
-                        },
-                        @{
-                            ruleType = "NetworkRule"
-                            name = "blocked-IPs-inbound"
-                            ipProtocols = @("Any")
-                            sourceIpGroups = @($IpGroupIds)
-                            destinationAddresses = @("*")
-                            destinationPorts = @("*")
-                        }
-                    )
+                    rules = @()  # Always use empty array instead of null
                     name = $ruleCollectionName
                     priority = $rulePriority
                 }
@@ -315,14 +324,37 @@ function Update-RuleCollectionGroup {
         }
     }
 
-    return Invoke-AzureRestMethod -Method Put -Uri "$url`?api-version=$apiVersion" `
+    # Only add rules if we have IP groups
+    if ($IpGroupIds.Count -gt 0) {
+        $body.properties.ruleCollections[0].rules = @(
+            @{
+                ruleType = "NetworkRule"
+                name = "blocked-IPs-outbound"
+                ipProtocols = @("Any")
+                sourceAddresses = @("*")
+                destinationIpGroups = $IpGroupIds
+                destinationPorts = @("*")
+            },
+            @{
+                ruleType = "NetworkRule"
+                name = "blocked-IPs-inbound"
+                ipProtocols = @("Any")
+                sourceIpGroups = $IpGroupIds
+                destinationAddresses = @("*")
+                destinationPorts = @("*")
+            }
+        )
+    }
+
+    Write-FunctionLog "Making request to: $url" -Level "Verbose"
+    Write-FunctionLog "Request body: $($body | ConvertTo-Json -Depth 10)" -Level "Verbose"
+
+    return Invoke-RestMethod -Method Put -Uri "$url`?api-version=2024-07-01" `
         -Headers @{
             "Authorization" = "Bearer $Token"
             "Content-Type" = "application/json"
         } `
-        -Body ($body | ConvertTo-Json -Compress -Depth 10) `
-        -MaxRetries 3 `
-        -RetryDelay 5
+        -Body ($body | ConvertTo-Json -Compress -Depth 10)
 }
 
 # Write success responses in consistent format
@@ -358,15 +390,17 @@ function Invoke-AzureRestMethod {
         [Parameter(Mandatory = $false)]
         [string]$Body,
         [Parameter(Mandatory = $false)]
-        [int]$MaxRetries = 5,
+        [int]$MaxRetries = 3,
         [Parameter(Mandatory = $false)]
-        [int]$RetryDelay = 10
+        [int]$RetryDelay = 5,
+        [Parameter(Mandatory = $false)]
+        [string]$ApiVersion = $script:apiVersion
     )
 
     $attempt = 1
     while ($attempt -le $MaxRetries) {
         try {
-            Write-FunctionLog "API Request Attempt $attempt of $MaxRetries to $Uri"
+            Write-FunctionLog "API Request Attempt $attempt of $MaxRetries to $Uri" -Level "Verbose"
 
             if ($attempt -gt 1) {
                 $delay = $RetryDelay * [Math]::Pow(2, ($attempt - 1))
@@ -375,10 +409,10 @@ function Invoke-AzureRestMethod {
             }
 
             if ($Body) {
-                $result = Invoke-RestMethod -Method $Method -Uri $Uri -Headers $Headers -Body $Body
+                $result = Invoke-RestMethod -Method $Method -Uri "$Uri`?api-version=$ApiVersion" -Headers $Headers -Body $Body -ContentType "application/json"
             }
             else {
-                $result = Invoke-RestMethod -Method $Method -Uri $Uri -Headers $Headers
+                $result = Invoke-RestMethod -Method $Method -Uri "$Uri`?api-version=$ApiVersion" -Headers $Headers
             }
 
             return $result
@@ -415,23 +449,24 @@ function Invoke-TestAction {
     Write-FunctionLog "- Base IP Group Name: $baseIpGroupName"
 
     # Test IP Groups
-    $apiVersion = "2024-01-01"
-    $ipGroupsUrl = "https://management.azure.com/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Network/ipGroups?api-version=$apiVersion"
+    $ipGroupsUrl = "https://management.azure.com/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Network/ipGroups"
 
     Write-FunctionLog "Testing IP Groups access..."
     Write-FunctionLog "Request URL: $ipGroupsUrl"
 
     try {
-        $ipGroups = Invoke-RestMethod -Method Get -Uri $ipGroupsUrl -Headers $Headers -ErrorAction Stop
-        $blockedIpGroups = $ipGroups.value | Where-Object { $_.name -like "$baseIpGroupName-*" }
+        $ipGroups = Invoke-AzureRestMethod -Method Get `
+            -Uri $ipGroupsUrl `
+            -Headers $Headers `
+            -MaxRetries 3 `
+            -RetryDelay 5 `
+            -ApiVersion "2024-07-01"
 
-        if ($blockedIpGroups) {
-            Write-FunctionLog "Found $($blockedIpGroups.Count) IP Groups matching pattern '$baseIpGroupName-*'"
-            foreach ($group in $blockedIpGroups) {
-                Write-FunctionLog "- $($group.name): $($group.properties.ipAddresses.Count) IPs" -Level "Verbose"
-            }
-        } else {
-            Write-FunctionLog "No IP Groups found matching pattern '$baseIpGroupName-*'" -Level "Warning"
+        $blockedIpGroups = $ipGroups.value | Where-Object { $_.name -like "$baseIpGroupName-*" }
+        
+        Write-FunctionLog "Found $($blockedIpGroups.Count) IP Groups matching pattern '$baseIpGroupName-*'"
+        foreach ($group in $blockedIpGroups) {
+            Write-FunctionLog "- $($group.name): $($group.properties.ipAddresses.Count) IPs" -Level "Verbose"
         }
     }
     catch {
@@ -440,13 +475,19 @@ function Invoke-TestAction {
     }
 
     # Test Rule Collection Group
-    $ruleCollectionUrl = "https://management.azure.com/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Network/firewallPolicies/$policyName/ruleCollectionGroups/$ruleCollectionGroupName?api-version=$apiVersion"
+    $ruleCollectionUrl = "https://management.azure.com/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Network/firewallPolicies/$policyName/ruleCollectionGroups/$ruleCollectionGroupName"
 
     Write-FunctionLog "Testing Rule Collection Group access..."
     Write-FunctionLog "Request URL: $ruleCollectionUrl"
 
     try {
-        $ruleCollection = Invoke-RestMethod -Method Get -Uri $ruleCollectionUrl -Headers $Headers -ErrorAction Stop
+        $ruleCollection = Invoke-AzureRestMethod -Method Get `
+            -Uri $ruleCollectionUrl `
+            -Headers $Headers `
+            -MaxRetries 3 `
+            -RetryDelay 5 `
+            -ApiVersion $script:apiVersion
+
         Write-FunctionLog "Successfully retrieved Rule Collection Group"
     }
     catch {
@@ -456,95 +497,166 @@ function Invoke-TestAction {
 
     # Return detailed response
     Write-SuccessResponse -Message "Successfully connected to Azure Firewall resources" -Details @{
-        ipGroups = $blockedIpGroups
+        ipGroups = if ($blockedIpGroups) { @($blockedIpGroups) } else { @() }  # Convert to array or empty array
         ruleCollectionGroup = $ruleCollection
         resourceGroup = $resourceGroup
         policyName = $policyName
         requestInfo = @{
             ipGroupsUrl = $ipGroupsUrl
             ruleCollectionUrl = $ruleCollectionUrl
-            apiVersion = $apiVersion
             baseIpGroupName = $baseIpGroupName
+            firewallApiVersion = $script:apiVersion
+            ipGroupApiVersion = "2024-07-01"
         }
     }
 }
 
 function Invoke-UpdateAction {
-    param(
-        [string]$Token
-    )
+    param([string]$Token)
 
     Write-FunctionLog "Starting update action..."
-    Write-FunctionLog "Fetching blocklist from URL: $blocklistUrl"
 
-    # Get blocklist IPs
+    # Get blocklist IPs first
+    Write-FunctionLog "Fetching blocklist from URL: $blocklistUrl"
     $blocklistIps = Get-BlocklistIps -Url $blocklistUrl
     Write-FunctionLog "Found $($blocklistIps.Count) IPs in blocklist"
 
-    if ($blocklistIps.Count -eq 0) {
-        Write-FunctionLog "No IPs found in blocklist" -Level "Warning"
-        Write-SuccessResponse -Message "No blocklist IPs to update"
-        return
-    }
-
+    # Get all existing groups
+    Write-FunctionLog "Fetching existing IP groups..."
+    $existingGroups = Invoke-AzureRestMethod -Method Get `
+        -Uri "https://management.azure.com/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Network/ipGroups" `
+        -Headers @{ "Authorization" = "Bearer $Token" } `
+        -MaxRetries 3 `
+        -RetryDelay 5 `
+        -ApiVersion "2024-07-01"
+    
+    $existingBlocklistGroups = $existingGroups.value | Where-Object { $_.name -like "$baseIpGroupName-*" }
+    
     # Split IPs into groups
     $ipGroups = Split-IpsIntoGroups -IpList $blocklistIps -MaxIpsPerGroup $maxIpsPerGroup -MaxGroups $maxIpGroups
-    Write-FunctionLog "Split IPs into $($ipGroups.Count) groups"
+    Write-FunctionLog "Need $($ipGroups.Count) groups for current IPs"
 
-    $ipGroupResults = @()
+    # First, update rule collection to empty state
+    Write-FunctionLog "Removing IP group references from rule collection"
+    $result = Update-RuleCollectionGroup -Token $Token `
+        -SubscriptionId $subscriptionId `
+        -ResourceGroup $resourceGroup `
+        -FirewallPolicyName $policyName
 
-    foreach ($groupIndex in 0..($ipGroups.Count-1)) {
-        $groupIps = $ipGroups[$groupIndex]
-        $groupName = "$baseIpGroupName-{0:D3}" -f ($groupIndex + 1)
-
-        Write-FunctionLog "Processing group $($groupIndex + 1) of $($ipGroups.Count) with $($groupIps.Count) IPs"
-
-        try {
-            $ipGroup = Update-IpGroup -Token $Token `
-                -SubscriptionId $subscriptionId `
-                -ResourceGroup $resourceGroup `
-                -IpAddresses $groupIps `
-                -IpGroupName $groupName
-
-            $ipGroupResults += @{
-                id = $ipGroup.id
-                name = $groupName
-                count = $groupIps.Count
-            }
-            Write-FunctionLog "Updated/Created IP Group $groupName. ID: $($ipGroup.id)"
+    # Wait for the rule collection update to complete
+    Write-FunctionLog "Waiting for rule collection update to complete..."
+    $maxWaitTime = 300 # 5 minutes
+    $startTime = Get-Date
+    do {
+        Start-Sleep -Seconds 10
+        $status = Invoke-AzureRestMethod -Method Get `
+            -Uri "https://management.azure.com$($result.id)" `
+            -Headers @{ "Authorization" = "Bearer $Token" } `
+            -ApiVersion "2024-07-01"
+        
+        if ($status.properties.provisioningState -eq "Succeeded") {
+            Write-FunctionLog "Rule collection update completed"
+            break
         }
-        catch {
-            $errorRecord = $_
-            $errorMessage = $errorRecord.Exception.Message
-            $stackTrace = $errorRecord.ScriptStackTrace
+        elseif ($status.properties.provisioningState -eq "Failed") {
+            throw "Rule collection update failed"
+        }
 
-            Write-FunctionLog "Failed to update group $groupName. Error: $errorMessage" -Level "Error"
-            Write-FunctionLog "Stack trace: $stackTrace" -Level "Error"
+        if (((Get-Date) - $startTime).TotalSeconds -gt $maxWaitTime) {
+            throw "Timeout waiting for rule collection update"
+        }
 
-            throw "Failed to process IP group '$groupName': $errorMessage"
+        Write-FunctionLog "Still waiting... Current state: $($status.properties.provisioningState)" -Level "Verbose"
+    } while ($true)
+
+    # Update existing groups and create new ones as needed
+    $newGroupResults = @()
+    $groupsToDelete = [System.Collections.ArrayList]@($existingBlocklistGroups)
+
+    for ($i = 0; $i -lt $ipGroups.Count; $i++) {
+        $groupIps = $ipGroups[$i]
+        $groupName = "$baseIpGroupName-{0:D3}" -f ($i + 1)
+        
+        # Check if we can reuse an existing group
+        $existingGroup = $existingBlocklistGroups | Where-Object { $_.name -eq $groupName }
+        
+        if ($existingGroup) {
+            Write-FunctionLog "Updating existing group $groupName with $($groupIps.Count) IPs"
+            $groupsToDelete.Remove($existingGroup)
+        } else {
+            Write-FunctionLog "Creating new group $groupName with $($groupIps.Count) IPs"
+        }
+
+        $ipGroup = Update-IpGroup -Token $Token `
+            -SubscriptionId $subscriptionId `
+            -ResourceGroup $resourceGroup `
+            -IpAddresses $groupIps `
+            -IpGroupName $groupName
+
+        $newGroupResults += @{
+            id = $ipGroup.id
+            name = $groupName
+            count = $groupIps.Count
+            isNew = ($null -eq $existingGroup)
         }
     }
 
-    Write-FunctionLog "Updating Rule Collection Group with $($ipGroupResults.Count) IP groups..."
+    # Delete any remaining unused groups
+    if ($groupsToDelete.Count -gt 0) {
+        Write-FunctionLog "Deleting $($groupsToDelete.Count) unused groups"
+        foreach ($group in $groupsToDelete) {
+            Write-FunctionLog "Deleting unused group $($group.name)"
+            Remove-IpGroup -Token $Token `
+                -SubscriptionId $subscriptionId `
+                -ResourceGroup $resourceGroup `
+                -IpGroupName $group.name
+        }
+    }
 
+    # Update firewall policy with all groups
+    Write-FunctionLog "Creating new rule collection with IP groups"
     $result = Update-RuleCollectionGroup -Token $Token `
         -SubscriptionId $subscriptionId `
         -ResourceGroup $resourceGroup `
         -FirewallPolicyName $policyName `
-        -IpGroupIds ($ipGroupResults.id)
+        -IpGroupIds ($newGroupResults.id)
 
-    Write-SuccessResponse -Message "Firewall policy updated successfully" -Details @{
-        ipGroupIds = $ipGroupResults.id
-        ruleCollectionGroup = $result
-        totalIpsProcessed = $blocklistIps.Count
-        groupsCreated = $ipGroups.Count
-        ipsPerGroup = $ipGroups | ForEach-Object { $_.Count }
-        requestInfo = @{
-            blocklistUrl = $blocklistUrl
-            maxTotalIps = $maxTotalIps
-            maxIpsPerGroup = $maxIpsPerGroup
-            maxIpGroups = $maxIpGroups
-        }
+    Write-SuccessResponse -Message "Successfully updated IP groups" -Details @{
+        groupsCreated = ($newGroupResults | Where-Object { $_.isNew })
+        groupsUpdated = ($newGroupResults | Where-Object { -not $_.isNew })
+        groupsDeleted = $groupsToDelete | Select-Object name
+        totalIps = $blocklistIps.Count
+    }
+}
+
+# Add new function to delete IP groups
+function Remove-IpGroup {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Token,
+        [Parameter(Mandatory = $true)]
+        [string]$SubscriptionId,
+        [Parameter(Mandatory = $true)]
+        [string]$ResourceGroup,
+        [Parameter(Mandatory = $true)]
+        [string]$IpGroupName
+    )
+
+    try {
+        Write-FunctionLog "Deleting IP Group '$IpGroupName'..."
+        
+        $baseUrl = "https://management.azure.com"
+        $url = "$baseUrl/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.Network/ipGroups/$IpGroupName"
+        
+        Invoke-RestMethod -Method Delete -Uri "$url`?api-version=2024-07-01" `
+            -Headers @{ "Authorization" = "Bearer $Token" }
+        
+        Write-FunctionLog "Successfully deleted IP Group '$IpGroupName'"
+        return $true
+    }
+    catch {
+        Write-FunctionLog "Failed to delete IP Group '$IpGroupName': $_" -Level "Error"
+        throw
     }
 }
 
@@ -583,15 +695,15 @@ function Invoke-UnblockAction {
 
     # Get all IP groups
     Write-FunctionLog "Fetching IP groups..."
-    $apiVersion = "2024-01-01"
-    $ipGroupsUrl = "https://management.azure.com/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Network/ipGroups?api-version=$apiVersion"
+    $ipGroupsUrl = "https://management.azure.com/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Network/ipGroups"
 
     try {
         Write-FunctionLog "Making API request to: $ipGroupsUrl"
         $ipGroups = Invoke-AzureRestMethod -Method Get -Uri $ipGroupsUrl `
             -Headers @{ "Authorization" = "Bearer $Token" } `
             -MaxRetries 3 `
-            -RetryDelay 5
+            -RetryDelay 5 `
+            -ApiVersion "2024-07-01"
         Write-FunctionLog "Successfully retrieved IP groups"
 
         $blockedIpGroups = $ipGroups.value | Where-Object { $_.name -like "$baseIpGroupName-*" }
@@ -606,8 +718,9 @@ function Invoke-UnblockAction {
         throw
     }
 
-    # Track which groups were updated
+    # Track which groups were updated or deleted
     $updatedGroups = @()
+    $deletedGroups = @()
     $unblocked = [System.Collections.ArrayList]@()
 
     # Process each IP group
@@ -631,40 +744,54 @@ function Invoke-UnblockAction {
             }
 
             if ($remainingIps.Count -eq 0) {
-                Write-FunctionLog "Group would be empty, adding placeholder IP" -Level "Warning"
-                $remainingIps = @("0.0.0.0/32")  # Placeholder IP if group would be empty
-            }
+                Write-FunctionLog "Group would be empty, deleting group $($group.name)" -Level "Warning"
+                try {
+                    Remove-IpGroup -Token $Token `
+                        -SubscriptionId $subscriptionId `
+                        -ResourceGroup $resourceGroup `
+                        -IpGroupName $group.name
 
-            try {
-                Write-FunctionLog "Group object: $($group | ConvertTo-Json)" -Level "Verbose"
-                Write-FunctionLog "Group name: $($group.name)" -Level "Verbose"
-                Write-FunctionLog "Remaining IPs count: $($remainingIps.Count)" -Level "Verbose"
-
-                $ipGroup = Update-IpGroup -Token $Token `
-                    -SubscriptionId $subscriptionId `
-                    -ResourceGroup $resourceGroup `
-                    -IpAddresses $remainingIps `
-                    -IpGroupName $group.name
-
-                Write-FunctionLog "Updated IP Group $($group.name) with $($remainingIps.Count) IPs" -Level "Verbose"
-                $updatedGroups += @{
-                    id = $ipGroup.id
-                    name = $group.name
-                    removedCount = $ipsToRemove.Count
-                    remainingCount = $remainingIps.Count
+                    $deletedGroups += @{
+                        name = $group.name
+                        removedCount = $ipsToRemove.Count
+                    }
+                    [void]$unblocked.AddRange([string[]]@($ipsToRemove))
                 }
-
-                [void]$unblocked.AddRange([string[]]@($ipsToRemove))
-                Write-FunctionLog "Successfully updated group $($group.name) with $($remainingIps.Count) IPs"
+                catch {
+                    Write-FunctionLog "Failed to delete empty group $($group.name): $_" -Level "Error"
+                    throw
+                }
             }
-            catch {
-                Write-FunctionLog "Failed to update group $($group.name): $_" -Level "Error"
-                throw
+            else {
+                try {
+                    Write-FunctionLog "Group object: $($group | ConvertTo-Json)" -Level "Verbose"
+                    Write-FunctionLog "Group name: $($group.name)" -Level "Verbose"
+                    Write-FunctionLog "Remaining IPs count: $($remainingIps.Count)" -Level "Verbose"
+
+                    $ipGroup = Update-IpGroup -Token $Token `
+                        -SubscriptionId $subscriptionId `
+                        -ResourceGroup $resourceGroup `
+                        -IpAddresses $remainingIps `
+                        -IpGroupName $group.name
+
+                    Write-FunctionLog "Updated IP Group $($group.name) with $($remainingIps.Count) IPs" -Level "Verbose"
+                    $updatedGroups += @{
+                        id = $ipGroup.id
+                        name = $group.name
+                        removedCount = $ipsToRemove.Count
+                        remainingCount = $remainingIps.Count
+                    }
+                    [void]$unblocked.AddRange([string[]]@($ipsToRemove))
+                }
+                catch {
+                    Write-FunctionLog "Failed to update group $($group.name): $_" -Level "Error"
+                    throw
+                }
             }
         }
     }
 
-    if ($updatedGroups.Count -eq 0) {
+    if ($updatedGroups.Count -eq 0 -and $deletedGroups.Count -eq 0) {
         Write-FunctionLog "No IP Groups needed updating" -Level "Warning"
         Write-SuccessResponse -Message "No IPs found to unblock" -Details @{
             requestInfo = @{
@@ -675,16 +802,26 @@ function Invoke-UnblockAction {
         return
     }
 
-    # Update Rule Collection Group with all groups
-    Write-FunctionLog "Updating Rule Collection Group..."
-    $result = Update-RuleCollectionGroup -Token $Token `
-        -SubscriptionId $subscriptionId `
-        -ResourceGroup $resourceGroup `
-        -FirewallPolicyName $policyName `
-        -IpGroupIds ($blockedIpGroups | ForEach-Object { $_.id })  # Get id from each group
+    # Get remaining groups after deletions
+    $remainingGroups = $blockedIpGroups | Where-Object { $_.name -notin $deletedGroups.name }
+
+    if ($remainingGroups.Count -gt 0) {
+        # Update Rule Collection Group with remaining groups
+        Write-FunctionLog "Updating Rule Collection Group..."
+        $result = Update-RuleCollectionGroup -Token $Token `
+            -SubscriptionId $subscriptionId `
+            -ResourceGroup $resourceGroup `
+            -FirewallPolicyName $policyName `
+            -IpGroupIds ($remainingGroups | ForEach-Object { $_.id })
+    }
+    else {
+        Write-FunctionLog "No remaining groups to update in Rule Collection"
+        $result = $null
+    }
 
     Write-SuccessResponse -Message "Successfully unblocked IPs" -Details @{
         updatedGroups = $updatedGroups
+        deletedGroups = $deletedGroups
         ruleCollectionGroup = $result
         unblocked = $unblocked
         requestInfo = @{
@@ -715,7 +852,7 @@ try {
             scope = "https://management.azure.com/.default"
         }
 
-        $tokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUrl -Body $tokenBody
+        $tokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUrl -Body $tokenBody -ContentType "application/x-www-form-urlencoded"
         if (-not $tokenResponse.access_token) {
             throw "Failed to get valid access token"
         }

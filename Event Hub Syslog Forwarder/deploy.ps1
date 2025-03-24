@@ -8,9 +8,6 @@ param(
     
     [Parameter(Mandatory = $true)]
     [string]$FunctionAppName,
-    
-    [Parameter(Mandatory = $true)]
-    [string]$StorageAccountName,
 
     [Parameter(Mandatory = $true)]
     [string]$SyslogServer,
@@ -31,6 +28,24 @@ param(
 
 # Error handling
 $ErrorActionPreference = 'Stop'
+
+# Helper function to generate valid storage account name
+function Get-ValidStorageAccountName {
+    param([string]$FunctionAppName)
+    
+    # Remove any special characters and convert to lowercase
+    $name = $FunctionAppName.ToLower() -replace '[^a-z0-9]', ''
+    
+    # Append 'storage' to make it more descriptive
+    $name = "${name}storage"
+    
+    # Ensure the name is no longer than 24 characters
+    if ($name.Length -gt 24) {
+        $name = $name.Substring(0, 24)
+    }
+    
+    return $name
+}
 
 # Verify Azure connection
 try {
@@ -53,6 +68,10 @@ if (-not $resourceGroup) {
     throw "Resource Group '$ResourceGroupName' not found. Please specify an existing resource group."
 }
 
+# Generate storage account name from function app name
+$StorageAccountName = Get-ValidStorageAccountName -FunctionAppName $FunctionAppName
+Write-Host "Using storage account name: $StorageAccountName"
+
 # Create Storage Account
 Write-Host "Creating Storage Account..."
 $storageAccount = Get-AzStorageAccount -ResourceGroupName $ResourceGroupName -Name $StorageAccountName -ErrorAction SilentlyContinue
@@ -63,16 +82,109 @@ if (-not $storageAccount) {
         -SkuName Standard_LRS
 }
 
-# Create Function App
+# Create Application Insights
+Write-Host "Creating Application Insights..."
+$appInsightsName = "$FunctionAppName-insights"
+$appInsights = Get-AzApplicationInsights -ResourceGroupName $ResourceGroupName -Name $appInsightsName -ErrorAction SilentlyContinue
+if (-not $appInsights) {
+    $appInsights = New-AzApplicationInsights -ResourceGroupName $ResourceGroupName `
+        -Name $appInsightsName `
+        -Location $Location `
+        -Kind web `
+        -RetentionInDays 90
+}
+
+# Create Function App with Application Insights
 Write-Host "Creating Function App..."
-$functionApp = New-AzFunctionApp -ResourceGroupName $ResourceGroupName `
-    -Name $FunctionAppName `
-    -StorageAccountName $StorageAccountName `
-    -Runtime PowerShell `
-    -RuntimeVersion 7.2 `
-    -FunctionsVersion 4 `
-    -OSType Windows `
-    -Location $Location
+$functionAppParams = @{
+    ResourceGroupName = $ResourceGroupName
+    Name = $FunctionAppName
+    StorageAccountName = $StorageAccountName
+    SubscriptionId = $context.Subscription.Id
+    Runtime = "PowerShell"
+    OSType = "Windows"
+    ApplicationInsightsKey = $appInsights.InstrumentationKey
+    PlanType = "Consumption"
+}
+
+# Check if Function App exists
+$existingApp = Get-AzFunctionApp -Name $FunctionAppName -ResourceGroupName $ResourceGroupName -ErrorAction SilentlyContinue
+if ($existingApp) {
+    Write-Host "Updating existing Function App..."
+    $functionApp = Update-AzFunctionApp @functionAppParams
+} else {
+    Write-Host "Creating new Function App..."
+    $functionApp = New-AzFunctionApp @functionAppParams
+}
+
+# Configure runtime versions
+Write-Host "Configuring runtime versions..."
+$runtimeSettings = @{
+    "FUNCTIONS_WORKER_RUNTIME" = "powershell"
+    "FUNCTIONS_WORKER_RUNTIME_VERSION" = "7.2"
+    "FUNCTIONS_EXTENSION_VERSION" = "~4"
+}
+Update-AzFunctionAppSetting -Name $FunctionAppName -ResourceGroupName $ResourceGroupName -AppSetting $runtimeSettings
+
+# Force sync resource state
+Write-Host "Syncing Function App state..."
+$null = Get-AzFunctionApp -Name $FunctionAppName -ResourceGroupName $ResourceGroupName -Force
+
+# Validate required permissions
+Write-Host "Validating required permissions..."
+$roles = @(
+    @{
+        Name = "Azure Event Hubs Data Receiver"
+        Description = "Required for reading from Event Hub"
+        Scope = "Microsoft.EventHub/namespaces"
+    },
+    @{
+        Name = "Storage Blob Data Contributor"
+        Description = "Required for Function App storage access"
+        Scope = "Microsoft.Storage/storageAccounts"
+    }
+)
+
+# Get the Function App's managed identity
+$functionAppIdentity = Get-AzWebApp -ResourceGroupName $ResourceGroupName -Name $FunctionAppName
+$objectId = $functionAppIdentity.Identity.PrincipalId
+
+if (-not $objectId) {
+    Write-Host "Warning: Function App managed identity not found. Enabling system-assigned managed identity..." -ForegroundColor Yellow
+    $functionApp = Set-AzWebApp -ResourceGroupName $ResourceGroupName -Name $FunctionAppName -AssignIdentity $true
+    $objectId = $functionApp.Identity.PrincipalId
+}
+
+# Check role assignments
+$currentAssignments = Get-AzRoleAssignment -ObjectId $objectId -ResourceGroupName $ResourceGroupName
+$missingRoles = @()
+
+foreach ($role in $roles) {
+    if (-not ($currentAssignments | Where-Object { $_.RoleDefinitionName -eq $role.Name })) {
+        $missingRoles += $role
+    }
+}
+
+if ($missingRoles.Count -gt 0) {
+    Write-Host "Warning: Function App is missing the following required roles:" -ForegroundColor Yellow
+    foreach ($role in $missingRoles) {
+        Write-Host "- $($role.Name)" -ForegroundColor Yellow
+        Write-Host "  Description: $($role.Description)" -ForegroundColor Yellow
+        Write-Host "  Resource Type: $($role.Scope)" -ForegroundColor Yellow
+    }
+    Write-Host "`nSteps to assign roles:" -ForegroundColor Yellow
+    Write-Host "1. Go to the Resource Group '$ResourceGroupName'" -ForegroundColor Yellow
+    Write-Host "2. Click 'Access control (IAM)'" -ForegroundColor Yellow
+    Write-Host "3. Click '+ Add' > 'Add role assignment'" -ForegroundColor Yellow
+    Write-Host "4. Select the missing role" -ForegroundColor Yellow
+    Write-Host "5. Select 'Managed identity' for Assign access to" -ForegroundColor Yellow
+    Write-Host "6. Select the function app '$FunctionAppName'" -ForegroundColor Yellow
+    Write-Host "7. Click 'Review + assign'" -ForegroundColor Yellow
+    Write-Host "`nNote: The function may not work correctly until these roles are assigned." -ForegroundColor Yellow
+}
+else {
+    Write-Host "Function App has all required roles." -ForegroundColor Green
+}
 
 # Configure environment variables
 Write-Host "Configuring environment variables..."
@@ -82,8 +194,9 @@ $settings = @{
     "SYSLOG_PROTOCOL" = $Protocol
     "EVENT_HUB_NAME" = $EventHubName
     "EVENTHUB_CONNECTION" = $EventHubConnection
-    "FUNCTIONS_WORKER_RUNTIME" = "powershell"
     "WEBSITE_RUN_FROM_PACKAGE" = "0"
+    "APPLICATIONINSIGHTS_CONNECTION_STRING" = $appInsights.ConnectionString
+    "APPINSIGHTS_INSTRUMENTATIONKEY" = $appInsights.InstrumentationKey
 }
 
 Update-AzFunctionAppSetting -Name $FunctionAppName -ResourceGroupName $ResourceGroupName -AppSetting $settings
@@ -164,6 +277,7 @@ Write-Host "`nDeployment completed!"
 Write-Host "`nFunction App Details:"
 Write-Host "Name: $FunctionAppName"
 Write-Host "URL: https://$FunctionAppName.azurewebsites.net"
+Write-Host "Application Insights: $appInsightsName"
 Write-Host "Syslog Server: $SyslogServer"
 Write-Host "Syslog Port: $SyslogPort"
 Write-Host "Protocol: $Protocol"

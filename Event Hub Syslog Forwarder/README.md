@@ -1,190 +1,162 @@
 # Event Hub Syslog Forwarder
 
-Azure Function that forwards Azure Event Hub messages to a Syslog server over SSL/UDP. This function processes various Azure log types including Flow Logs, DNS Queries, DNS Responses, and Firewall Logs.
+Azure Function that forwards syslog messages to Azure Event Hub. Supports both UDP and SSL/TLS protocols for syslog ingestion.
 
 ## Features
-
-- Secure log forwarding:
-  - SSL/TLS
-  - UDP
-- Support for multiple log types:
-  - Virtual Network Flow Logs
-  - Azure Firewall DNS Query Logs
-  - Azure Firewall DNS Response Logs
-  - Azure Firewall Network/Application Rules Logs
-- Real-time log processing
-- Configurable syslog formatting
-- Detailed error handling and logging
-- High-volume log processing with batching
-- In-portal code editing support
+- Receive syslog messages via UDP or SSL/TLS
+- Forward messages to Azure Event Hub
+- Configurable protocol and port settings
+- Comprehensive error handling and logging
+- Secure TLS certificate management
+- Custom role-based access control
+- Automatic storage account naming
 
 ## Prerequisites
-
 - Azure subscription
-- Existing Event Hub namespace and Event Hub containing logs
-- Syslog server with SSL/TLS or UDP support
-- Network connectivity between Function App and Syslog server
+- Existing Event Hub namespace and Event Hub
 - PowerShell 7.2 or later
 - Azure PowerShell modules:
   - Az.Accounts
   - Az.Resources
   - Az.Storage
   - Az.Functions
+  - Az.EventHub
+
+## Required Permissions
+The function requires the following permissions:
+
+### Role Assignments
+1. **Event Hub Data Sender** role on the Event Hub
+   - Required for:
+     - Sending messages to Event Hub
+     - Managing Event Hub connections
+
+2. **Contributor** role on the resource group
+   - Required for:
+     - Creating and managing function resources
+     - Managing storage accounts
+     - Configuring network settings
+
+### Permission Details
+- Microsoft.EventHub/namespaces/eventhubs/messages/send
+- Microsoft.Web/sites/config/write
+- Microsoft.Storage/storageAccounts/*
+
+### How to Assign Permissions
+1. Go to the Azure Portal
+2. Navigate to your Event Hub
+3. Click "Access control (IAM)"
+4. Click "+ Add" > "Add role assignment"
+5. Select "Event Hub Data Sender"
+6. Search for and select your function app's managed identity
+7. Click "Review + assign"
+
+## Configuration
+
+### Required Environment Variables
+- `SYSLOG_SERVER`: Syslog server address
+- `SYSLOG_PORT`: Syslog server port
+- `EVENT_HUB_NAME`: Event Hub name
+- `EVENT_HUB_CONNECTION`: Event Hub connection string
+- `PROTOCOL`: Syslog protocol (SSL or UDP)
+
+### Optional Environment Variables
+- `LOG_VERBOSITY`: Logging detail level (1=Basic, 2=Verbose)
+- `MAX_BATCH_SIZE`: Maximum batch size for Event Hub messages (default: 1000)
+- `BATCH_TIMEOUT`: Timeout for batch sending in seconds (default: 30)
+- `SSL_CERT_PATH`: Path to SSL certificate (required for SSL protocol)
+- `SSL_KEY_PATH`: Path to SSL private key (required for SSL protocol)
 
 ## Setup
 
-1. Prepare Event Hub:
-   - Ensure your Event Hub is receiving logs (Flow Logs, Firewall Logs, etc.)
-   - Get Event Hub Connection String:
-     1. Navigate to your Event Hub namespace in Azure Portal
-     2. Go to "Shared access policies"
-     3. Select a policy (e.g., "RootManageSharedAccessKey" or create a new one with Manage permissions)
-     4. Copy the "Connection string-primary key"
+### NOTE
+These commands have only been tested via cloud shell
 
-2. Upload the content
-You will need to copy the powershell scripts deploy and clean,
-as well as the full src folder.
-With the following layout.
-Else the scripts won't find the required contents.
-
+1. Upload the content:
+   You will need to copy the PowerShell scripts deploy and clean,
+   as well as the full src folder with the following layout:
+   ```
    - deploy.ps1
    - cleanup.ps1
    - src
-       - function.json
-       - host.json
-       - run.ps1
+     - function.json
+     - host.json
+     - requirements.psd1
+     - run.ps1
+   ```
 
 2. Deploy using PowerShell:
 ```powershell
 ./deploy.ps1 `
-    -ResourceGroupName "your-resource-group" `
+    -ResourceGroupName "your-rg" `
     -Location "eastus" `
-    -FunctionAppName "your-function-name" `
-    -StorageAccountName "yourstorage" `
-    -SyslogServer "your-syslog-server" `
-    -SyslogPort 6514 `
-    -Protocol "SSL" `
-    -EventHubName "your-event-hub-name" `
-    -EventHubConnection "Endpoint=sb://..."
+    -FunctionAppName "your-func-name" `
+    -SyslogServer "syslog.example.com" `
+    -SyslogPort 514 `
+    -EventHubName "your-eventhub" `
+    -EventHubConnection "your-connection-string" `
+    -Protocol "SSL"
 ```
 
-### Deployment Parameters
-
-| Parameter | Description | Example |
-|-----------|-------------|---------|
-| ResourceGroupName | Existing resource group name | "syslog-forwarder-rg" |
-| Location | Azure region for deployment | "eastus" |
-| FunctionAppName | Globally unique function app name | "syslog-forwarder-func" |
-| StorageAccountName | Globally unique storage account name | "syslogstore" |
-| SyslogServer | Syslog server hostname/IP | "syslog.company.com" |
-| SyslogPort | Syslog server port (SSL:6514, UDP:514) | 6514 |
-| Protocol | "SSL" or "UDP" | "SSL" |
-| EventHubName | Name of your Event Hub | "firewall-logs" |
-| EventHubConnection | Event Hub connection string | "Endpoint=sb://..." |
-
 The deployment script will:
-1. Create a storage account (if it doesn't exist)
+1. Create a storage account with name derived from the function app name
+   - Removes special characters and ensures valid Azure storage naming
+   - Example: "your-func-name" → "yourfuncnamestorage"
 2. Create and configure the function app
 3. Set up all required environment variables
 4. Deploy the function code
 5. Enable in-portal editing
 
-## Configuration
+## Error Handling and Monitoring
 
-### Environment Variables
-All environment variables are automatically configured during deployment:
-- `SYSLOG_SERVER`: Hostname/IP of your syslog server
-- `SYSLOG_PORT`: Port number for syslog server
-- `SYSLOG_PROTOCOL`: Protocol to use ("SSL" or "UDP")
-- `EVENT_HUB_NAME`: Name of the Event Hub
-- `EVENTHUB_CONNECTION`: Event Hub connection string
+### Error Handling
+The function includes comprehensive error handling:
+- Input validation
+- Connection error handling with retries
+- Detailed error logging
+- Consistent error responses
 
-### Modifying the Function
-
-You can modify the function code directly in the Azure Portal:
-1. Go to your Function App
-2. Select "Functions" from the left menu
-3. Click on "EventHubTrigger"
-4. Select "Code + Test"
-5. Make your changes and save
-
-## Log Types and Formatting
-
-### 1. Flow Logs
-```
-<13>TimeGenerated=timestamp Type=FlowLog SrcIp=ip DstIp=ip Protocol=protocol Action=action ...
-```
-- Traffic flows through Network Security Groups
-- Source/destination IPs, ports, protocols
-- Flow timing and status information
-
-### 2. DNS Query Logs
-```
-<13>TimeGenerated=timestamp Type=DnsQueryLog QueryName=name QueryType=type ResponseCode=code ...
-```
-- DNS queries processed by Azure Firewall
-- Query details (name, type, class)
-- Response information
-
-### 3. DNS Response Logs
-```
-<13>TimeGenerated=timestamp Type=DnsResponseLog QueryName=name AnswerType=type AnswerData=data ...
-```
-- Detailed DNS response information
-- Answer records with types and TTLs
-- Resolution paths and policies
-
-### 4. Firewall Logs
-```
-<13>TimeGenerated=timestamp Type=FirewallLog SrcIp=ip DstIp=ip Action=action Rule=rule ...
-```
-- Traffic allowed/denied by firewall rules
-- Rule collection and policy information
-- Connection details
-
-## Monitoring
-
+### Monitoring
 Monitor the function using:
-- Azure Portal > Function App > Functions > EventHubTrigger > Monitor
-- Application Insights (if enabled)
+- Azure Portal > Function App > Functions > syslog > Monitor
+- Application Insights logs and metrics
 - Function execution logs
-- Syslog server logs
 
-### Available Metrics
-- Log processing duration
-- Successful/failed transmissions
-- Batch sizes
-- Error rates
+### Common Issues
+1. SSL certificate configuration issues
+2. Event Hub connection problems
+3. Network connectivity errors
+4. Rate limiting on Event Hub
+5. Message size limitations
 
-## Troubleshooting
-
+### Troubleshooting Steps
 1. Check function logs in Azure Portal:
-   - Go to Function App > Functions > EventHubTrigger > Monitor
+   - Go to Function App > Functions > syslog > Monitor
    - Or use Azure CLI:
 ```powershell
 az functionapp logs tail `
-    --name "your-function-name" `
-    --resource-group "your-resource-group"
+    --name "your-func-name" `
+    --resource-group "your-rg"
 ```
 
-2. Common issues:
-   - Event Hub connectivity issues
-   - Syslog server connection failures
-   - SSL/TLS certificate validation errors
-   - Network connectivity problems
-   - Missing environment variables
+2. Verify permissions:
+   - Check Event Hub Data Sender role
+   - Validate Event Hub connection string
+   - Test network connectivity
 
 ## Cleanup
 
 Remove all deployed resources:
 ```powershell
 ./cleanup.ps1 `
-    -ResourceGroupName "your-resource-group" `
-    -FunctionAppName "your-function-name" `
-    -StorageAccountName "yourstorage"
+    -ResourceGroupName "your-rg" `
+    -FunctionAppName "your-func-name"
 ```
 
-The cleanup script will:
-1. Prompt for confirmation
-2. Remove the Function App
-3. Remove the Storage Account 
+## Documentation
+
+### [API Reference](API-Reference.md)
+- API endpoints and usage
+- Message format specifications
+- Error handling
+- Implementation details 

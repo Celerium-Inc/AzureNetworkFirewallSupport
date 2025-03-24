@@ -4,18 +4,36 @@ param(
     [string]$ResourceGroupName,
     
     [Parameter(Mandatory = $true)]
-    [string]$FunctionAppName,
-    
-    [Parameter(Mandatory = $true)]
-    [string]$StorageAccountName
+    [string]$FunctionAppName
 )
 
 # Error handling
 $ErrorActionPreference = 'Stop'
 
+# Helper function to generate valid storage account name
+function Get-ValidStorageAccountName {
+    param([string]$FunctionAppName)
+    
+    # Remove any special characters and convert to lowercase
+    $name = $FunctionAppName.ToLower() -replace '[^a-z0-9]', ''
+    
+    # Append 'storage' to make it more descriptive
+    $name = "${name}storage"
+    
+    # Ensure the name is no longer than 24 characters
+    if ($name.Length -gt 24) {
+        $name = $name.Substring(0, 24)
+    }
+    
+    return $name
+}
+
 Write-Host "Starting cleanup process..."
 Write-Host "Resource Group: $ResourceGroupName"
 Write-Host "Function App: $FunctionAppName"
+
+# Generate storage account name
+$StorageAccountName = Get-ValidStorageAccountName -FunctionAppName $FunctionAppName
 Write-Host "Storage Account: $StorageAccountName"
 
 # Prompt for confirmation
@@ -47,7 +65,7 @@ function Ensure-AzureConnection {
     }
 }
 
-# Ensure we're connected before each operation
+# Ensure we're connected before proceeding
 if (-not (Ensure-AzureConnection)) {
     Write-Host "Cannot proceed without Azure connection" -ForegroundColor Red
     exit 1
@@ -56,7 +74,6 @@ if (-not (Ensure-AzureConnection)) {
 # Remove Function App
 try {
     Write-Host "Removing Function App $FunctionAppName..."
-    if (-not (Ensure-AzureConnection)) { throw "Lost Azure connection" }
     Remove-AzFunctionApp -Name $FunctionAppName -ResourceGroupName $ResourceGroupName -Force
     Write-Host "Function App removed successfully"
 }
@@ -67,7 +84,6 @@ catch {
 # Remove Storage Account
 try {
     Write-Host "Removing Storage Account $StorageAccountName..."
-    if (-not (Ensure-AzureConnection)) { throw "Lost Azure connection" }
     Remove-AzStorageAccount -ResourceGroupName $ResourceGroupName -Name $StorageAccountName -Force
     Write-Host "Storage Account removed successfully"
 }

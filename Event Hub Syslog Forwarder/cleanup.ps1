@@ -4,18 +4,36 @@ param(
     [string]$ResourceGroupName,
     
     [Parameter(Mandatory = $true)]
-    [string]$FunctionAppName,
-    
-    [Parameter(Mandatory = $true)]
-    [string]$StorageAccountName
+    [string]$FunctionAppName
 )
 
 # Error handling
 $ErrorActionPreference = 'Stop'
 
+# Helper function to generate valid storage account name
+function Get-ValidStorageAccountName {
+    param([string]$FunctionAppName)
+    
+    # Remove any special characters and convert to lowercase
+    $name = $FunctionAppName.ToLower() -replace '[^a-z0-9]', ''
+    
+    # Append 'storage' to make it more descriptive
+    $name = "${name}storage"
+    
+    # Ensure the name is no longer than 24 characters
+    if ($name.Length -gt 24) {
+        $name = $name.Substring(0, 24)
+    }
+    
+    return $name
+}
+
 Write-Host "Starting cleanup process..."
 Write-Host "Resource Group: $ResourceGroupName"
 Write-Host "Function App: $FunctionAppName"
+
+# Generate storage account name
+$StorageAccountName = Get-ValidStorageAccountName -FunctionAppName $FunctionAppName
 Write-Host "Storage Account: $StorageAccountName"
 
 # Prompt for confirmation
