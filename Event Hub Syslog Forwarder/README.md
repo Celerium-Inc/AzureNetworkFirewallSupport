@@ -7,8 +7,9 @@ Azure Function that forwards syslog messages to Azure Event Hub. Supports both U
 - Forward messages to Azure Event Hub
 - Configurable protocol and port settings
 - Comprehensive error handling and logging
-- Secure TLS certificate management
+- Secure service principal authentication
 - Custom role-based access control
+- Optimized deployment process with retries
 - Automatic storage account naming
 
 ## Prerequisites
@@ -21,35 +22,26 @@ Azure Function that forwards syslog messages to Azure Event Hub. Supports both U
   - Az.Storage
   - Az.Functions
   - Az.EventHub
+  - Az.ApplicationInsights
 
 ## Required Permissions
 The function requires the following permissions:
 
 ### Role Assignments
-1. **Event Hub Data Sender** role on the Event Hub
-   - Required for:
-     - Sending messages to Event Hub
-     - Managing Event Hub connections
+1. **Azure Event Hubs Data Receiver** role on the Event Hub namespace
+   - Required for reading from Event Hub
+   - Scope: Microsoft.EventHub/namespaces
 
-2. **Contributor** role on the resource group
-   - Required for:
-     - Creating and managing function resources
-     - Managing storage accounts
-     - Configuring network settings
+2. **Storage Blob Data Contributor** role on the storage account
+   - Required for Function App storage access
+   - Scope: Microsoft.Storage/storageAccounts
 
 ### Permission Details
 - Microsoft.EventHub/namespaces/eventhubs/messages/send
-- Microsoft.Web/sites/config/write
 - Microsoft.Storage/storageAccounts/*
+- Microsoft.Web/sites/config/write
 
-### How to Assign Permissions
-1. Go to the Azure Portal
-2. Navigate to your Event Hub
-3. Click "Access control (IAM)"
-4. Click "+ Add" > "Add role assignment"
-5. Select "Event Hub Data Sender"
-6. Search for and select your function app's managed identity
-7. Click "Review + assign"
+The deployment script will validate these permissions and provide guidance if any are missing.
 
 ## Configuration
 
@@ -57,31 +49,29 @@ The function requires the following permissions:
 - `SYSLOG_SERVER`: Syslog server address
 - `SYSLOG_PORT`: Syslog server port
 - `EVENT_HUB_NAME`: Event Hub name
-- `EVENT_HUB_CONNECTION`: Event Hub connection string
+- `EVENTHUB_CONNECTION`: Event Hub connection string
 - `PROTOCOL`: Syslog protocol (SSL or UDP)
 
 ### Optional Environment Variables
-- `LOG_VERBOSITY`: Logging detail level (1=Basic, 2=Verbose)
-- `MAX_BATCH_SIZE`: Maximum batch size for Event Hub messages (default: 1000)
-- `BATCH_TIMEOUT`: Timeout for batch sending in seconds (default: 30)
-- `SSL_CERT_PATH`: Path to SSL certificate (required for SSL protocol)
-- `SSL_KEY_PATH`: Path to SSL private key (required for SSL protocol)
+- `FUNCTIONS_WORKER_RUNTIME`: PowerShell (default)
+- `FUNCTIONS_WORKER_RUNTIME_VERSION`: 7.2 (default)
+- `FUNCTIONS_EXTENSION_VERSION`: ~4 (default)
+- `APPLICATIONINSIGHTS_CONNECTION_STRING`: Auto-configured
+- `APPINSIGHTS_INSTRUMENTATIONKEY`: Auto-configured
 
 ## Setup
 
 ### NOTE
-These commands have only been tested via cloud shell
+These commands have been tested via cloud shell
 
 1. Upload the content:
-   You will need to copy the PowerShell scripts deploy and clean,
-   as well as the full src folder with the following layout:
+   You will need to copy the PowerShell scripts and src folder with the following layout:
    ```
    - deploy.ps1
    - cleanup.ps1
    - src
      - function.json
      - host.json
-     - requirements.psd1
      - run.ps1
    ```
 
@@ -95,17 +85,26 @@ These commands have only been tested via cloud shell
     -SyslogPort 514 `
     -EventHubName "your-eventhub" `
     -EventHubConnection "your-connection-string" `
-    -Protocol "SSL"
+    -Protocol "SSL"  # Optional, defaults to SSL
 ```
 
 The deployment script will:
-1. Create a storage account with name derived from the function app name
-   - Removes special characters and ensures valid Azure storage naming
-   - Example: "your-func-name" → "yourfuncnamestorage"
-2. Create and configure the function app
-3. Set up all required environment variables
-4. Deploy the function code
-5. Enable in-portal editing
+1. Verify Azure connection and resource group
+2. Create or update storage account (auto-named from function app name)
+3. Create or update Application Insights
+4. Create or update Function App
+5. Configure runtime settings and environment variables
+6. Validate required permissions
+7. Deploy function code with retry logic
+8. Restart the function app
+
+### Deployment Validation
+The script performs several validation steps:
+1. Resource group existence
+2. Storage account naming
+3. Required permissions
+4. Function runtime compatibility
+5. File deployment success
 
 ## Error Handling and Monitoring
 
@@ -118,20 +117,20 @@ The function includes comprehensive error handling:
 
 ### Monitoring
 Monitor the function using:
-- Azure Portal > Function App > Functions > syslog > Monitor
+- Azure Portal > Function App > Functions > EventHubTrigger > Monitor
 - Application Insights logs and metrics
 - Function execution logs
 
 ### Common Issues
-1. SSL certificate configuration issues
+1. Missing role assignments
 2. Event Hub connection problems
 3. Network connectivity errors
 4. Rate limiting on Event Hub
-5. Message size limitations
+5. Function app deployment issues
 
 ### Troubleshooting Steps
 1. Check function logs in Azure Portal:
-   - Go to Function App > Functions > syslog > Monitor
+   - Go to Function App > Functions > EventHubTrigger > Monitor
    - Or use Azure CLI:
 ```powershell
 az functionapp logs tail `
@@ -140,8 +139,8 @@ az functionapp logs tail `
 ```
 
 2. Verify permissions:
-   - Check Event Hub Data Sender role
-   - Validate Event Hub connection string
+   - Check role assignments in IAM
+   - Validate Event Hub connection
    - Test network connectivity
 
 ## Cleanup
@@ -152,6 +151,12 @@ Remove all deployed resources:
     -ResourceGroupName "your-rg" `
     -FunctionAppName "your-func-name"
 ```
+
+The cleanup script will remove:
+1. Function App
+2. Application Insights
+3. Associated storage account
+4. Any related resources
 
 ## Documentation
 

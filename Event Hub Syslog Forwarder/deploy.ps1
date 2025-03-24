@@ -72,7 +72,7 @@ if (-not $resourceGroup) {
 $StorageAccountName = Get-ValidStorageAccountName -FunctionAppName $FunctionAppName
 Write-Host "Using storage account name: $StorageAccountName"
 
-# Create Storage Account
+# Create Storage Account if it doesn't exist
 Write-Host "Creating Storage Account..."
 $storageAccount = Get-AzStorageAccount -ResourceGroupName $ResourceGroupName -Name $StorageAccountName -ErrorAction SilentlyContinue
 if (-not $storageAccount) {
@@ -96,25 +96,28 @@ if (-not $appInsights) {
 
 # Create Function App with Application Insights
 Write-Host "Creating Function App..."
-$functionAppParams = @{
-    ResourceGroupName = $ResourceGroupName
-    Name = $FunctionAppName
-    StorageAccountName = $StorageAccountName
-    SubscriptionId = $context.Subscription.Id
-    Runtime = "PowerShell"
-    OSType = "Windows"
-    ApplicationInsightsKey = $appInsights.InstrumentationKey
-    PlanType = "Consumption"
-}
 
 # Check if Function App exists
 $existingApp = Get-AzFunctionApp -Name $FunctionAppName -ResourceGroupName $ResourceGroupName -ErrorAction SilentlyContinue
 if ($existingApp) {
     Write-Host "Updating existing Function App..."
-    $functionApp = Update-AzFunctionApp @functionAppParams
+    # For updating, we use a minimal set of parameters
+    $functionApp = Update-AzFunctionApp `
+        -ResourceGroupName $ResourceGroupName `
+        -Name $FunctionAppName
 } else {
     Write-Host "Creating new Function App..."
-    $functionApp = New-AzFunctionApp @functionAppParams
+    # For new creation, we use the full set of parameters
+    $functionApp = New-AzFunctionApp `
+        -ResourceGroupName $ResourceGroupName `
+        -Name $FunctionAppName `
+        -StorageAccountName $StorageAccountName `
+        -Location $Location `
+        -Runtime "PowerShell" `
+        -RuntimeVersion "7.2" `
+        -FunctionsVersion "4" `
+        -OSType "Windows" `
+        -ApplicationInsightsKey $appInsights.InstrumentationKey
 }
 
 # Configure runtime versions
@@ -126,9 +129,9 @@ $runtimeSettings = @{
 }
 Update-AzFunctionAppSetting -Name $FunctionAppName -ResourceGroupName $ResourceGroupName -AppSetting $runtimeSettings
 
-# Force sync resource state
+# Sync resource state
 Write-Host "Syncing Function App state..."
-$null = Get-AzFunctionApp -Name $FunctionAppName -ResourceGroupName $ResourceGroupName -Force
+$null = Get-AzFunctionApp -Name $FunctionAppName -ResourceGroupName $ResourceGroupName
 
 # Validate required permissions
 Write-Host "Validating required permissions..."
@@ -215,9 +218,6 @@ try {
     $srcPath = Join-Path $scriptPath "src"
     Write-Host "Source path: $srcPath"
     
-    # Create the function in the portal
-    $functionPath = "D:\home\site\wwwroot\EventHubTrigger"
-    
     # Get publishing credentials
     $publishingCredentials = Invoke-AzResourceAction -ResourceGroupName $ResourceGroupName `
         -ResourceType Microsoft.Web/sites/config `
@@ -231,16 +231,43 @@ try {
 
     # Create function directory
     Write-Host "Creating function directory..."
-    Invoke-RestMethod -Uri "$apiUrl/site/wwwroot/EventHubTrigger/" `
+    $null = Invoke-RestMethod -Uri "$apiUrl/site/wwwroot/EventHubTrigger/" `
         -Headers @{Authorization="Basic $base64Auth"} `
         -Method PUT
 
-    # Upload each file individually
+    # Upload each file individually with retries
     Write-Host "Uploading function files..."
+    $maxRetries = 3
+    $retryDelay = 5
+
+    function Invoke-WithRetry {
+        param(
+            [string]$Uri,
+            [string]$Method,
+            [string]$ContentType,
+            [string]$Body,
+            [hashtable]$Headers
+        )
+
+        $attempt = 1
+        while ($attempt -le $maxRetries) {
+            try {
+                return Invoke-RestMethod -Uri $Uri -Method $Method -ContentType $ContentType -Body $Body -Headers $Headers
+            }
+            catch {
+                if ($attempt -eq $maxRetries) {
+                    throw
+                }
+                Write-Host "Attempt $attempt failed, retrying in $retryDelay seconds..."
+                Start-Sleep -Seconds $retryDelay
+                $attempt++
+            }
+        }
+    }
     
     # Upload function.json
     $functionJson = Get-Content -Path (Join-Path $srcPath "function.json") -Raw
-    Invoke-RestMethod -Uri "$apiUrl/site/wwwroot/EventHubTrigger/function.json" `
+    Invoke-WithRetry -Uri "$apiUrl/site/wwwroot/EventHubTrigger/function.json" `
         -Headers @{Authorization="Basic $base64Auth"} `
         -Method PUT `
         -Body $functionJson `
@@ -248,7 +275,7 @@ try {
 
     # Upload run.ps1
     $runPs1 = Get-Content -Path (Join-Path $srcPath "run.ps1") -Raw
-    Invoke-RestMethod -Uri "$apiUrl/site/wwwroot/EventHubTrigger/run.ps1" `
+    Invoke-WithRetry -Uri "$apiUrl/site/wwwroot/EventHubTrigger/run.ps1" `
         -Headers @{Authorization="Basic $base64Auth"} `
         -Method PUT `
         -Body $runPs1 `
@@ -256,7 +283,7 @@ try {
 
     # Upload host.json to root
     $hostJson = Get-Content -Path (Join-Path $srcPath "host.json") -Raw
-    Invoke-RestMethod -Uri "$apiUrl/site/wwwroot/host.json" `
+    Invoke-WithRetry -Uri "$apiUrl/site/wwwroot/host.json" `
         -Headers @{Authorization="Basic $base64Auth"} `
         -Method PUT `
         -Body $hostJson `
