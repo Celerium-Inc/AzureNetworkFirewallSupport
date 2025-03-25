@@ -36,6 +36,10 @@ Write-Host "Function App: $FunctionAppName"
 $StorageAccountName = Get-ValidStorageAccountName -FunctionAppName $FunctionAppName
 Write-Host "Storage Account: $StorageAccountName"
 
+# Generate Application Insights name
+$AppInsightsName = "$FunctionAppName-insights"
+Write-Host "Application Insights: $AppInsightsName"
+
 # Prompt for confirmation
 $confirmation = Read-Host "Are you sure you want to delete these resources? (y/n)"
 if ($confirmation -ne 'y') {
@@ -89,6 +93,16 @@ try {
 }
 catch {
     Write-Host "Error removing Storage Account: $_" -ForegroundColor Red
+}
+
+# Remove Application Insights
+try {
+    Write-Host "Removing Application Insights $AppInsightsName..."
+    Remove-AzApplicationInsights -ResourceGroupName $ResourceGroupName -Name $AppInsightsName -Force
+    Write-Host "Application Insights removed successfully"
+}
+catch {
+    Write-Host "Error removing Application Insights: $_" -ForegroundColor Red
 }
 
 Write-Host "Cleanup completed!" 
