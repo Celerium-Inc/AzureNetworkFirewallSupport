@@ -169,47 +169,6 @@ Update-AzFunctionAppSetting -Name $FunctionAppName -ResourceGroupName $ResourceG
 Write-Host "Syncing Function App state..."
 $null = Get-AzFunctionApp -Name $FunctionAppName -ResourceGroupName $ResourceGroupName
 
-# Validate required permissions
-Write-Host "Validating required permissions..."
-$roles = @(
-    @{
-        Name = "Azure Event Hubs Data Receiver"
-        Description = "Required for reading from Event Hub"
-        Scope = "Microsoft.EventHub/namespaces"
-    },
-    @{
-        Name = "Storage Blob Data Contributor"
-        Description = "Required for Function App storage access"
-        Scope = "Microsoft.Storage/storageAccounts"
-    }
-)
-
-# Get the Function App's managed identity
-$functionAppIdentity = Get-AzWebApp -ResourceGroupName $ResourceGroupName -Name $FunctionAppName
-$objectId = $functionAppIdentity.Identity.PrincipalId
-
-if (-not $objectId) {
-    $functionApp = Set-AzWebApp -ResourceGroupName $ResourceGroupName -Name $FunctionAppName -AssignIdentity $true
-    $objectId = $functionApp.Identity.PrincipalId
-}
-
-# Check role assignments
-$currentAssignments = Get-AzRoleAssignment -ObjectId $objectId -ResourceGroupName $ResourceGroupName
-$missingRoles = @()
-
-foreach ($role in $roles) {
-    if (-not ($currentAssignments | Where-Object { $_.RoleDefinitionName -eq $role.Name })) {
-        $missingRoles += $role
-    }
-}
-
-if ($missingRoles.Count -gt 0) {
-    Write-Host "Assigning required roles to Function App..."
-    foreach ($role in $missingRoles) {
-        New-AzRoleAssignment -ObjectId $objectId -RoleDefinitionName $role.Name -ResourceGroupName $ResourceGroupName
-    }
-}
-
 # Configure environment variables
 Write-Host "Configuring environment variables..."
 $settings = @{

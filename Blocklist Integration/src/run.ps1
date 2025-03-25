@@ -725,23 +725,38 @@ function Invoke-UnblockAction {
 
     # Process each IP group
     foreach ($group in $blockedIpGroups) {
+        Write-FunctionLog "Processing group: $($group.name)" -Level "Verbose"
+        
         # Get current IPs both with and without CIDR
         $currentIpsWithCidr = $group.properties.ipAddresses
         $currentIpsWithoutCidr = $currentIpsWithCidr | ForEach-Object { $_ -replace '/32$', '' }
+        
+        Write-FunctionLog "Current IPs in group (with CIDR): $($currentIpsWithCidr -join ', ')" -Level "Verbose"
+        Write-FunctionLog "Current IPs in group (without CIDR): $($currentIpsWithoutCidr -join ', ')" -Level "Verbose"
+        Write-FunctionLog "IPs to unblock: $($validIps -join ', ')" -Level "Verbose"
 
         # Check for matches in both formats
         $ipsToRemove = $validIps | Where-Object {
             $ip = $_
-            $ip -in $currentIpsWithoutCidr -or "$ip/32" -in $currentIpsWithCidr
+            $isMatch = $ip -in $currentIpsWithoutCidr -or "$ip/32" -in $currentIpsWithCidr
+            Write-FunctionLog "Checking IP $ip - Match found: $isMatch" -Level "Verbose"
+            $isMatch
         }
 
         if ($ipsToRemove) {
             Write-FunctionLog "Found $($ipsToRemove.Count) IPs to remove from group $($group.name)"
+            Write-FunctionLog "IPs to remove: $($ipsToRemove -join ', ')" -Level "Verbose"
 
             # Keep original CIDR format for remaining IPs
             $remainingIps = $currentIpsWithCidr | Where-Object {
-                ($_ -replace '/32$', '') -notin $ipsToRemove
+                $ip = $_
+                $shouldKeep = ($_ -replace '/32$', '') -notin $ipsToRemove
+                Write-FunctionLog "Checking if IP $ip should be kept: $shouldKeep" -Level "Verbose"
+                $shouldKeep
             }
+            
+            Write-FunctionLog "Remaining IPs after removal: $($remainingIps.Count)" -Level "Verbose"
+            Write-FunctionLog "Remaining IPs: $($remainingIps -join ', ')" -Level "Verbose"
 
             if ($remainingIps.Count -eq 0) {
                 Write-FunctionLog "Group would be empty, deleting group $($group.name)" -Level "Warning"

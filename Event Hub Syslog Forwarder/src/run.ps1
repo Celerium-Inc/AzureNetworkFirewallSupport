@@ -361,7 +361,7 @@ foreach ($event in $eventHubMessages)
     {
         try
         {
-            SendToSyslog -Message $syslogMessage -Server $syslogServer -Port $syslogPort -Protocol $protocol
+            SendToSyslog -Message $syslogMessage -Server $syslogServer -Port $syslogPort -Protocol $env:SYSLOG_PROTOCOL.ToUpper()
         }
         catch
         {

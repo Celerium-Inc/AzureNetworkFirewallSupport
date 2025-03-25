@@ -24,24 +24,6 @@ Azure Function that forwards syslog messages to Azure Event Hub. Supports both U
   - Az.EventHub
   - Az.ApplicationInsights
 
-## Required Permissions
-The function requires the following permissions:
-
-### Role Assignments
-1. **Azure Event Hubs Data Receiver** role on the Event Hub namespace
-   - Required for reading from Event Hub
-   - Scope: Microsoft.EventHub/namespaces
-
-2. **Storage Blob Data Contributor** role on the storage account
-   - Required for Function App storage access
-   - Scope: Microsoft.Storage/storageAccounts
-
-### Permission Details
-- Microsoft.EventHub/namespaces/eventhubs/messages/send
-- Microsoft.Storage/storageAccounts/*
-- Microsoft.Web/sites/config/write
-
-The deployment script will validate these permissions and provide guidance if any are missing.
 
 ## Configuration
 
