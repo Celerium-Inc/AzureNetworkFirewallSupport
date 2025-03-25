@@ -97,27 +97,63 @@ if (-not $appInsights) {
 # Create Function App with Application Insights
 Write-Host "Creating Function App..."
 
+# Helper function for retrying operations
+function Invoke-WithRetry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$ScriptBlock,
+        [int]$MaxAttempts = 5,
+        [int]$RetryDelaySeconds = 60
+    )
+
+    $attempt = 1
+    $success = $false
+
+    while (-not $success -and $attempt -le $MaxAttempts) {
+        try {
+            Write-Host "Attempt $attempt of $MaxAttempts..."
+            $result = & $ScriptBlock
+            $success = $true
+            return $result
+        }
+        catch {
+            if ($attempt -eq $MaxAttempts) {
+                Write-Host "Final attempt failed. Error: $_" -ForegroundColor Red
+                throw
+            }
+            Write-Host "Attempt $attempt failed. Retrying in $RetryDelaySeconds seconds... Error: $_" -ForegroundColor Yellow
+            Start-Sleep -Seconds $RetryDelaySeconds
+            $attempt++
+        }
+    }
+}
+
 # Check if Function App exists
 $existingApp = Get-AzFunctionApp -Name $FunctionAppName -ResourceGroupName $ResourceGroupName -ErrorAction SilentlyContinue
 if ($existingApp) {
     Write-Host "Updating existing Function App..."
     # For updating, we use a minimal set of parameters
-    $functionApp = Update-AzFunctionApp `
-        -ResourceGroupName $ResourceGroupName `
-        -Name $FunctionAppName
+    $functionApp = Invoke-WithRetry -ScriptBlock {
+        Update-AzFunctionApp `
+            -ResourceGroupName $ResourceGroupName `
+            -Name $FunctionAppName
+    }
 } else {
     Write-Host "Creating new Function App..."
-    # For new creation, we use the full set of parameters
-    $functionApp = New-AzFunctionApp `
-        -ResourceGroupName $ResourceGroupName `
-        -Name $FunctionAppName `
-        -StorageAccountName $StorageAccountName `
-        -Location $Location `
-        -Runtime "PowerShell" `
-        -RuntimeVersion "7.2" `
-        -FunctionsVersion "4" `
-        -OSType "Windows" `
-        -ApplicationInsightsKey $appInsights.InstrumentationKey
+    # For new creation, we use the full set of parameters with consumption plan
+    $functionApp = Invoke-WithRetry -ScriptBlock {
+        New-AzFunctionApp `
+            -ResourceGroupName $ResourceGroupName `
+            -Name $FunctionAppName `
+            -StorageAccountName $StorageAccountName `
+            -Location $Location `
+            -Runtime "PowerShell" `
+            -RuntimeVersion "7.2" `
+            -FunctionsVersion "4" `
+            -OSType "Windows" `
+            -ApplicationInsightsKey $appInsights.InstrumentationKey `
+            -DisableApplicationInsights:$false
+    }
 }
 
 # Configure runtime versions

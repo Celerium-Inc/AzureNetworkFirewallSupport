@@ -147,6 +147,7 @@ $runtimeSettings = @{
     "FUNCTIONS_WORKER_RUNTIME" = "powershell"
     "FUNCTIONS_WORKER_RUNTIME_VERSION" = "7.2"
     "FUNCTIONS_EXTENSION_VERSION" = "~4"
+    "WEBSITE_RUN_FROM_PACKAGE" = "0"  # Enable in-portal editing
 }
 Update-AzFunctionAppSetting -Name $FunctionAppName -ResourceGroupName $ResourceGroupName -AppSetting $runtimeSettings
 
@@ -206,56 +207,50 @@ else {
     Write-Host "Service Principal has all required roles." -ForegroundColor Green
 }
 
-# Create the function
-Write-Host "Creating function..."
-$hostJson = Get-Content -Path (Join-Path $PSScriptRoot "src/host.json") -Raw
-$functionJson = Get-Content -Path (Join-Path $PSScriptRoot "src/function.json") -Raw
-$runPs1 = Get-Content -Path (Join-Path $PSScriptRoot "src/run.ps1") -Raw
-$requirementsPsd1 = Get-Content -Path (Join-Path $PSScriptRoot "src/requirements.psd1") -Raw
-
-# Get publishing credentials
-$publishingCredentials = Invoke-AzResourceAction -ResourceGroupName $ResourceGroupName `
-    -ResourceType Microsoft.Web/sites/config `
-    -ResourceName "$FunctionAppName/publishingcredentials" `
-    -Action list -Force
-
-$username = $publishingCredentials.Properties.PublishingUserName
-$password = $publishingCredentials.Properties.PublishingPassword
-$base64Auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$($username):$($password)"))
-
+# Deploy function code using Kudu API
+Write-Host "Deploying function code..."
 try {
-    # Create function files
+    # Get publishing credentials
+    $publishingCredentials = Get-AzWebAppPublishingCredentials -ResourceGroupName $ResourceGroupName -Name $FunctionAppName
+    $username = $publishingCredentials.Properties.PublishingUserName
+    $password = $publishingCredentials.Properties.PublishingPassword
+    $base64Auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$($username):$($password)"))
+
+    # Create function directory structure
     $kuduApiUrl = "https://$FunctionAppName.scm.azurewebsites.net/api/vfs/site/wwwroot"
     
-    # Create host.json first
-    Write-Host "Creating host.json..."
-    Invoke-RestMethod -Uri "$kuduApiUrl/host.json" -Headers @{
-        Authorization = "Basic $base64Auth"
-        "Content-Type" = "application/json"
-    } -Method Put -Body $hostJson
+    # Create function directory
+    Write-Host "Creating function directory..."
+    $null = Invoke-RestMethod -Uri "$kuduApiUrl/blocklist/" `
+        -Headers @{Authorization="Basic $base64Auth"} `
+        -Method PUT
 
-
-    # Create function files
-    Write-Host "Creating function files..."
-    $functionUrl = "$kuduApiUrl/blocklist"
+    # Upload function files
+    Write-Host "Uploading function files..."
     
-    # Create function.json
-    Invoke-RestMethod -Uri "$functionUrl/function.json" -Headers @{
-        Authorization = "Basic $base64Auth"
-        "Content-Type" = "application/json"
-    } -Method Put -Body $functionJson
+    # Upload function.json
+    $functionJson = Get-Content -Path (Join-Path $PSScriptRoot "src/function.json") -Raw
+    Invoke-RestMethod -Uri "$kuduApiUrl/blocklist/function.json" `
+        -Headers @{
+            Authorization = "Basic $base64Auth"
+            "Content-Type" = "application/json"
+        } -Method PUT -Body $functionJson
 
-    # Create run.ps1
-    Invoke-RestMethod -Uri "$functionUrl/run.ps1" -Headers @{
-        Authorization = "Basic $base64Auth"
-        "Content-Type" = "text/plain"
-    } -Method Put -Body $runPs1
+    # Upload run.ps1
+    $runPs1 = Get-Content -Path (Join-Path $PSScriptRoot "src/run.ps1") -Raw
+    Invoke-RestMethod -Uri "$kuduApiUrl/blocklist/run.ps1" `
+        -Headers @{
+            Authorization = "Basic $base64Auth"
+            "Content-Type" = "text/plain"
+        } -Method PUT -Body $runPs1
 
-    # Create requirements.psd1
-    Invoke-RestMethod -Uri "$functionUrl/requirements.psd1" -Headers @{
-        Authorization = "Basic $base64Auth"
-        "Content-Type" = "text/plain"
-    } -Method Put -Body $requirementsPsd1
+    # Upload host.json to root
+    $hostJson = Get-Content -Path (Join-Path $PSScriptRoot "src/host.json") -Raw
+    Invoke-RestMethod -Uri "$kuduApiUrl/host.json" `
+        -Headers @{
+            Authorization = "Basic $base64Auth"
+            "Content-Type" = "application/json"
+        } -Method PUT -Body $hostJson
 
     Write-Host "Function code deployed successfully"
 
@@ -287,4 +282,5 @@ Write-Host "        -d '{\"ips\":[\"1.1.1.1\",\"2.2.2.2\"]}'"
 
 Write-Host "`nNext steps:"
 Write-Host "1. Get your function key from the Azure Portal"
-Write-Host "2. Test the deployment" 
+Write-Host "2. Test the deployment"
+Write-Host "3. You can now edit the function code directly in the Azure Portal" 

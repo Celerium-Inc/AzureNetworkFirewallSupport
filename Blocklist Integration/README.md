@@ -263,7 +263,6 @@ Remove all deployed resources:
 ./cleanup.ps1 `
     -ResourceGroupName "your-rg" `
     -FunctionAppName "your-func-name" `
-    -StorageAccountName "yourstorage"
 ```
 
 ## Documentation
