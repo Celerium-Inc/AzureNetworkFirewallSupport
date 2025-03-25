@@ -190,21 +190,10 @@ foreach ($roleName in $roles) {
 }
 
 if ($missingRoles.Count -gt 0) {
-    Write-Host "Warning: Service Principal is missing the following required roles:" -ForegroundColor Yellow
-    foreach ($role in $missingRoles) {
-        Write-Host "- $role" -ForegroundColor Yellow
+    Write-Host "Assigning required roles to service principal..."
+    foreach ($roleName in $missingRoles) {
+        New-AzRoleAssignment -ObjectId $ClientId -RoleDefinitionName $roleName -ResourceGroupName $ResourceGroupName
     }
-    Write-Host "Please assign these roles to the Service Principal (Client ID: $ClientId) in the Azure Portal." -ForegroundColor Yellow
-    Write-Host "Steps to assign roles:" -ForegroundColor Yellow
-    Write-Host "1. Go to the Resource Group '$ResourceGroupName'" -ForegroundColor Yellow
-    Write-Host "2. Click 'Access control (IAM)'" -ForegroundColor Yellow
-    Write-Host "3. Click '+ Add' > 'Add role assignment'" -ForegroundColor Yellow
-    Write-Host "4. Select the missing role" -ForegroundColor Yellow
-    Write-Host "5. Search for and select your service principal" -ForegroundColor Yellow
-    Write-Host "6. Click 'Review + assign'" -ForegroundColor Yellow
-}
-else {
-    Write-Host "Service Principal has all required roles." -ForegroundColor Green
 }
 
 # Deploy function code using Kudu API

@@ -189,7 +189,6 @@ $functionAppIdentity = Get-AzWebApp -ResourceGroupName $ResourceGroupName -Name 
 $objectId = $functionAppIdentity.Identity.PrincipalId
 
 if (-not $objectId) {
-    Write-Host "Warning: Function App managed identity not found. Enabling system-assigned managed identity..." -ForegroundColor Yellow
     $functionApp = Set-AzWebApp -ResourceGroupName $ResourceGroupName -Name $FunctionAppName -AssignIdentity $true
     $objectId = $functionApp.Identity.PrincipalId
 }
@@ -205,24 +204,10 @@ foreach ($role in $roles) {
 }
 
 if ($missingRoles.Count -gt 0) {
-    Write-Host "Warning: Function App is missing the following required roles:" -ForegroundColor Yellow
+    Write-Host "Assigning required roles to Function App..."
     foreach ($role in $missingRoles) {
-        Write-Host "- $($role.Name)" -ForegroundColor Yellow
-        Write-Host "  Description: $($role.Description)" -ForegroundColor Yellow
-        Write-Host "  Resource Type: $($role.Scope)" -ForegroundColor Yellow
+        New-AzRoleAssignment -ObjectId $objectId -RoleDefinitionName $role.Name -ResourceGroupName $ResourceGroupName
     }
-    Write-Host "`nSteps to assign roles:" -ForegroundColor Yellow
-    Write-Host "1. Go to the Resource Group '$ResourceGroupName'" -ForegroundColor Yellow
-    Write-Host "2. Click 'Access control (IAM)'" -ForegroundColor Yellow
-    Write-Host "3. Click '+ Add' > 'Add role assignment'" -ForegroundColor Yellow
-    Write-Host "4. Select the missing role" -ForegroundColor Yellow
-    Write-Host "5. Select 'Managed identity' for Assign access to" -ForegroundColor Yellow
-    Write-Host "6. Select the function app '$FunctionAppName'" -ForegroundColor Yellow
-    Write-Host "7. Click 'Review + assign'" -ForegroundColor Yellow
-    Write-Host "`nNote: The function may not work correctly until these roles are assigned." -ForegroundColor Yellow
-}
-else {
-    Write-Host "Function App has all required roles." -ForegroundColor Green
 }
 
 # Configure environment variables
