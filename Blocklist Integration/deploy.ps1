@@ -173,29 +173,6 @@ $settings = @{
 
 Update-AzFunctionAppSetting -Name $FunctionAppName -ResourceGroupName $ResourceGroupName -AppSetting $settings
 
-# Validate required roles for the service principal
-Write-Host "Validating required roles for service principal..."
-$roles = @(
-    "Network Contributor",      # Required for managing network resources
-    "Contributor"              # Required for managing IP Groups
-)
-
-$spRoles = Get-AzRoleAssignment -ResourceGroupName $ResourceGroupName -ObjectId $ClientId
-$missingRoles = @()
-
-foreach ($roleName in $roles) {
-    if (-not ($spRoles | Where-Object { $_.RoleDefinitionName -eq $roleName })) {
-        $missingRoles += $roleName
-    }
-}
-
-if ($missingRoles.Count -gt 0) {
-    Write-Host "Assigning required roles to service principal..."
-    foreach ($roleName in $missingRoles) {
-        New-AzRoleAssignment -ObjectId $ClientId -RoleDefinitionName $roleName -ResourceGroupName $ResourceGroupName
-    }
-}
-
 # Deploy function code using Kudu API
 Write-Host "Deploying function code..."
 try {
