@@ -98,7 +98,7 @@ catch {
 # Remove Application Insights
 try {
     Write-Host "Removing Application Insights $AppInsightsName..."
-    Remove-AzApplicationInsights -ResourceGroupName $ResourceGroupName -Name $AppInsightsName -Force
+    Remove-AzApplicationInsights -ResourceGroupName $ResourceGroupName -Name $AppInsightsName
     Write-Host "Application Insights removed successfully"
 }
 catch {
