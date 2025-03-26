@@ -184,23 +184,23 @@ Note: The function will validate these permissions during deployment and warn if
 These commands have only been run via cloud shell
 
 1. Upload the content:
-   You will need to copy the powershell scripts deploy and clean,
-   as well as the full src folder with the following layout:
+   You will need to copy the PowerShell scripts and blocklist folder with the following layout:
    ```
-   - deploy.ps1
-   - cleanup.ps1
-   - src
-     - function.json
-     - host.json
-     - requirements.psd1
-     - run.ps1
+   - block/
+     - deploy.ps1
+     - cleanup.ps1
+     - src/
+       - function.json
+       - host.json
+       - requirements.psd1
+       - run.ps1
    ```
 
 2. Deploy using PowerShell:
 ```powershell
-./deploy.ps1 `
+./block/deploy.ps1 `
     -ResourceGroupName "your-rg" `
-    -Location "eastus" `
+    -Location "your-loc" `
     -FunctionAppName "your-func-name" `
     -FirewallPolicyName "your-policy" `
     -FirewallName "your-firewall" `
@@ -260,7 +260,7 @@ az functionapp logs tail `
 
 Remove all deployed resources:
 ```powershell
-./cleanup.ps1 `
+./block/cleanup.ps1 `
     -ResourceGroupName "your-rg" `
     -FunctionAppName "your-func-name" `
 ```

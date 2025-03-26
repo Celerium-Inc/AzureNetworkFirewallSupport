@@ -47,21 +47,22 @@ Azure Function that forwards syslog messages to Azure Event Hub. Supports both U
 These commands have been tested via cloud shell
 
 1. Upload the content:
-   You will need to copy the PowerShell scripts and src folder with the following layout:
+   You will need to copy the PowerShell scripts and eventhub folder with the following layout:
    ```
-   - deploy.ps1
-   - cleanup.ps1
-   - src
-     - function.json
-     - host.json
-     - run.ps1
+   - forward/
+     - deploy.ps1
+     - cleanup.ps1
+     - src/
+       - function.json
+       - host.json
+       - run.ps1
    ```
 
 2. Deploy using PowerShell:
 ```powershell
-./deploy.ps1 `
+./forward/deploy.ps1 `
     -ResourceGroupName "your-rg" `
-    -Location "eastus" `
+    -Location "your-loc" `
     -FunctionAppName "your-func-name" `
     -SyslogServer "syslog.example.com" `
     -SyslogPort 514 `
@@ -129,7 +130,7 @@ az functionapp logs tail `
 
 Remove all deployed resources:
 ```powershell
-./cleanup.ps1 `
+./forward/cleanup.ps1 `
     -ResourceGroupName "your-rg" `
     -FunctionAppName "your-func-name"
 ```

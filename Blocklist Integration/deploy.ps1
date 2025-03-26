@@ -183,7 +183,7 @@ try {
     }
     
     # Verify source files exist
-    $srcPath = Join-Path $scriptPath "block/src"
+    $srcPath = Join-Path $scriptPath "src"
     Write-Host "Source path: $srcPath"
     
     # Get publishing credentials
