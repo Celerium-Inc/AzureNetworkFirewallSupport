@@ -155,7 +155,7 @@ foreach ($event in $eventHubMessages)
             # 2. Azure Firewall DNS Query Logs (category = AZFWDnsQuery)
             # 3. Azure Firewall DNS Response Logs (category = DnsResponse)
             # 4. Azure Firewall Network/Application Rules Logs (default case)
-            
+
             if ($record.SubType -eq "FlowLog")
             {
                 # Process Virtual Network Flow Logs
@@ -170,8 +170,7 @@ foreach ($event in $eventHubMessages)
                 # Extract and map fields from the payload
                 $faSchemaVersion = $record.FaSchemaVersion
                 $isFlowCapturedAtUdrHop = $record.IsFlowCapturedAtUdrHop
-                # For the source IP, split the SrcPublicIps string and take the first element
-                $srcIp = ($record.SrcPublicIps -split "\|")[0]
+                $srcIp = $record.SrcIp
                 $destIp = $record.DestIp
                 $destPort = $record.DestPort
                 $flowType = $record.FlowType
