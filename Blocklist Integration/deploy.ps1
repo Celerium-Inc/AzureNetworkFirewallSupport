@@ -176,6 +176,16 @@ Update-AzFunctionAppSetting -Name $FunctionAppName -ResourceGroupName $ResourceG
 # Deploy function code using Kudu API
 Write-Host "Deploying function code..."
 try {
+    # Get the script's directory
+    $scriptPath = $PSScriptRoot
+    if (-not $scriptPath) {
+        $scriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
+    }
+    
+    # Verify source files exist
+    $srcPath = Join-Path $scriptPath "blocklist/src"
+    Write-Host "Source path: $srcPath"
+    
     # Get publishing credentials
     $publishingCredentials = Get-AzWebAppPublishingCredentials -ResourceGroupName $ResourceGroupName -Name $FunctionAppName
     $username = $publishingCredentials.Properties.PublishingUserName
@@ -195,7 +205,7 @@ try {
     Write-Host "Uploading function files..."
     
     # Upload function.json
-    $functionJson = Get-Content -Path (Join-Path $PSScriptRoot "src/function.json") -Raw
+    $functionJson = Get-Content -Path (Join-Path $srcPath "function.json") -Raw
     Invoke-RestMethod -Uri "$kuduApiUrl/blocklist/function.json" `
         -Headers @{
             Authorization = "Basic $base64Auth"
@@ -203,7 +213,7 @@ try {
         } -Method PUT -Body $functionJson
 
     # Upload run.ps1
-    $runPs1 = Get-Content -Path (Join-Path $PSScriptRoot "src/run.ps1") -Raw
+    $runPs1 = Get-Content -Path (Join-Path $srcPath "run.ps1") -Raw
     Invoke-RestMethod -Uri "$kuduApiUrl/blocklist/run.ps1" `
         -Headers @{
             Authorization = "Basic $base64Auth"
@@ -211,7 +221,7 @@ try {
         } -Method PUT -Body $runPs1
 
     # Upload host.json to root
-    $hostJson = Get-Content -Path (Join-Path $PSScriptRoot "src/host.json") -Raw
+    $hostJson = Get-Content -Path (Join-Path $srcPath "host.json") -Raw
     Invoke-RestMethod -Uri "$kuduApiUrl/host.json" `
         -Headers @{
             Authorization = "Basic $base64Auth"

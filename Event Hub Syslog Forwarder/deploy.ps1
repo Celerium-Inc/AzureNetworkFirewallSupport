@@ -195,7 +195,7 @@ try {
     }
     
     # Verify source files exist
-    $srcPath = Join-Path $scriptPath "src"
+    $srcPath = Join-Path $scriptPath "eventhub/src"
     Write-Host "Source path: $srcPath"
     
     # Get publishing credentials
