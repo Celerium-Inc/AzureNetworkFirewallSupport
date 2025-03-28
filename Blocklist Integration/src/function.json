@@ -1,20 +1,20 @@
 {
     "bindings": [
         {
-            "authLevel": "function",
-            "type": "httpTrigger",
+            "name": "Timer",
+            "type": "timerTrigger",
             "direction": "in",
-            "name": "Request",
-            "methods": [
-                "get",
-                "post"
-            ],
-            "route": "blocklist"
-        },
-        {
-            "type": "http",
-            "direction": "out",
-            "name": "Response"
+            "schedule": "0 */15 * * * *"
         }
-    ]
+    ],
+    "disabled": false,
+    "singletonLock": {
+        "lock": {
+            "mode": "Exclusive"
+        }
+    },
+    "concurrency": {
+        "maxConcurrentCalls": 1,
+        "singleInstance": true
+    }
 }

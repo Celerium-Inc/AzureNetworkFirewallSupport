@@ -105,4 +105,4 @@ catch {
     Write-Host "Error removing Application Insights: $_" -ForegroundColor Red
 }
 
-Write-Host "Cleanup completed!" 
+Write-Host "`nCleanup completed!" 

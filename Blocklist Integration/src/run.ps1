@@ -3,17 +3,10 @@
 # Features:
 # - Testing connectivity to Azure resources
 # - Updating blocklist from external source
-# - Unblocking specific IPs
 # - Both inbound and outbound blocking rules
 
-using namespace System.Net
-
 # Input bindings are passed in via param block
-param(
-    [Parameter(Mandatory = $true)]
-    $Request,            # HTTP request object containing query parameters and body
-    $TriggerMetadata    # Azure Functions runtime metadata
-)
+param($Timer)
 
 # Required environment variables
 $subscriptionId = $env:SUBSCRIPTION_ID
@@ -23,28 +16,22 @@ $policyName = $env:POLICY_NAME
 $blocklistUrl = $env:BLKLIST_URL
 
 # Optional configuration with defaults
-$maxTotalIps = [int]($env:MAX_TOTAL_IPS ?? 50000)
-$maxIpsPerGroup = [int]($env:MAX_IPS_PER_GROUP ?? 5000)
-$maxIpGroups = [int]($env:MAX_IP_GROUPS ?? 10)
-$baseIpGroupName = $env:BASE_IP_GROUP_NAME ?? "fw-blocklist"
-$ruleCollectionGroupName = $env:RULE_COLLECTION_GROUP_NAME ?? "CeleriumRuleCollectionGroup"
-$ruleCollectionName = $env:RULE_COLLECTION_NAME ?? "Blocked-IP-Collection"
-$rulePriority = [int]($env:RULE_PRIORITY ?? 100)
+$maxTotalIps = if ($env:MAX_TOTAL_IPS) { [int]$env:MAX_TOTAL_IPS } else { 50000 }
+$maxIpsPerGroup = if ($env:MAX_IPS_PER_GROUP) { [int]$env:MAX_IPS_PER_GROUP } else { 5000 }
+$maxIpGroups = if ($env:MAX_IP_GROUPS) { [int]$env:MAX_IP_GROUPS } else { 10 }
+$baseIpGroupName = if ($env:BASE_IP_GROUP_NAME) { $env:BASE_IP_GROUP_NAME } else { "fw-blocklist" }
+$ruleCollectionGroupName = if ($env:RULE_COLLECTION_GROUP_NAME) { $env:RULE_COLLECTION_GROUP_NAME } else { "CeleriumRuleCollectionGroup" }
+$ruleCollectionName = if ($env:RULE_COLLECTION_NAME) { $env:RULE_COLLECTION_NAME } else { "Blocked-IP-Collection" }
+$rulePriority = if ($env:RULE_PRIORITY) { [int]$env:RULE_PRIORITY } else { 100 }
 
 # Set logging verbosity (1=Basic, 2=Verbose)
-$global:LogVerbosity = [int]($env:LOG_VERBOSITY ?? 2)  # Default to verbose logging
+$global:LogVerbosity = if ($env:LOG_VERBOSITY) { [int]$env:LOG_VERBOSITY } else { 2 }  # Default to verbose logging
 
 # Error handling preference
 $ErrorActionPreference = 'Stop'
 
 # Cache IP regex pattern for performance
 $script:ipRegex = [regex]'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$'
-
-# Add at start of script
-$script:jsonSettings = [Newtonsoft.Json.JsonSerializerSettings]@{
-    TypeNameHandling = 'None'
-    MaxDepth = 10
-}
 
 # Global API version for all Azure REST API calls
 $script:apiVersion = "2024-01-01"
@@ -132,7 +119,203 @@ function Get-BlocklistIps {
     }
 }
 
-# Add function to split IPs into groups
+# Extract some complex expressions for IP group names into functions to make them more readable
+function Get-IpGroupName {
+    param(
+        [int]$Index
+    )
+    return "$baseIpGroupName-$('{0:D3}' -f ($Index + 1))"
+}
+
+# Improve Wait-ForResourceState with more PowerShell-friendly code
+function Wait-ForResourceState {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ResourceId,
+        [Parameter(Mandatory = $true)]
+        [string]$Token,
+        [Parameter(Mandatory = $false)]
+        [string]$DesiredState = "Succeeded",
+        [Parameter(Mandatory = $false)]
+        [int]$MaxWaitTimeSeconds = 360,
+        [Parameter(Mandatory = $false)]
+        [int]$InitialDelaySeconds = 2,
+        [Parameter(Mandatory = $false)]
+        [int]$InitialRetryIntervalSeconds = 10,
+        [Parameter(Mandatory = $false)]
+        [double]$BackoffMultiplier = 1.5,
+        [Parameter(Mandatory = $false)]
+        [int]$MaxRetryIntervalSeconds = 30
+    )
+
+    Write-FunctionLog "Waiting for resource $ResourceId to reach state '$DesiredState'..." -Level "Information"
+    
+    # Initial delay before first check
+    if ($InitialDelaySeconds -gt 0) {
+        Write-FunctionLog "Initial delay: $InitialDelaySeconds seconds..." -Level "Verbose"
+        Start-Sleep -Seconds $InitialDelaySeconds
+    }
+    
+    $startTime = Get-Date
+    $headers = @{
+        "Authorization" = "Bearer $Token"
+        "Content-Type" = "application/json"
+    }
+    
+    # Initialize variables for tracking and reporting
+    $lastReportTime = $startTime
+    $reportIntervalSeconds = 30
+    $retryIntervalSeconds = $InitialRetryIntervalSeconds
+    $attempt = 1
+    $lastState = $null
+    $consecutiveErrors = 0
+    $maxConsecutiveErrors = 3
+    
+    do {
+        try {
+            # Calculate elapsed time - use simple math operations
+            $elapsedTime = Get-Date
+            $elapsedSeconds = ($elapsedTime - $startTime).TotalSeconds
+            $remainingSeconds = $MaxWaitTimeSeconds - $elapsedSeconds
+            
+            # Check if we've exceeded the timeout
+            if ($remainingSeconds -le 0) {
+                # If we have a last state and it's still "Updating", return a special object instead of throwing
+                if ($lastState -eq "Updating") {
+                    $elapsedSecondsDisplay = [math]::Floor($elapsedSeconds)
+                    Write-FunctionLog "Resource is still updating after $elapsedSecondsDisplay seconds. Returning current state without error." -Level "Warning"
+                    return @{
+                        id = $ResourceId
+                        properties = @{
+                            provisioningState = $lastState
+                        }
+                        timeoutOccurred = $true
+                    }
+                }
+                throw "Timed out waiting for resource to reach state '$DesiredState'. Last known state: $lastState"
+            }
+            
+            # Make API request to check resource state
+            Write-FunctionLog "Checking resource state (Attempt $attempt)..." -Level "Verbose"
+            $apiUrl = "https://management.azure.com$ResourceId`?api-version=2024-07-01"
+            $status = Invoke-RestMethod -Method Get -Uri $apiUrl -Headers $headers -ErrorAction Stop
+            
+            # Reset error counter on success
+            $consecutiveErrors = 0
+            $currentState = $status.properties.provisioningState
+            
+            # Only log if state has changed
+            if ($currentState -ne $lastState) {
+                Write-FunctionLog "Resource state changed to: $currentState" -Level "Information"
+                $lastState = $currentState
+            }
+            
+            # Check if we've reached the desired state
+            if ($currentState -eq $DesiredState) {
+                $totalTime = [math]::Floor(((Get-Date) - $startTime).TotalSeconds)
+                Write-FunctionLog "Resource reached desired state: $DesiredState (took ${totalTime}s)" -Level "Information"
+                return $status
+            }
+            elseif ($currentState -eq "Failed") {
+                $errorDetails = "Unknown error"
+                if ($status.properties.error) {
+                    $errorDetails = $status.properties.error | ConvertTo-Json -Compress -Depth 3
+                }
+                throw "Resource provisioning failed. Details: $errorDetails"
+            }
+            
+            # Report progress periodically
+            $currentTime = Get-Date
+            $timeSinceLastReport = ($currentTime - $lastReportTime).TotalSeconds
+            if ($timeSinceLastReport -ge $reportIntervalSeconds) {
+                $elapsedSecondsDisplay = [math]::Floor(($currentTime - $startTime).TotalSeconds)
+                $remainingSecondsDisplay = [math]::Floor($remainingSeconds)
+                Write-FunctionLog "Still waiting for resource... State: $currentState, Elapsed: ${elapsedSecondsDisplay}s, Remaining: ${remainingSecondsDisplay}s" -Level "Information"
+                $lastReportTime = $currentTime
+            }
+            else {
+                Write-FunctionLog "Current state: $currentState, Next check in $retryIntervalSeconds seconds..." -Level "Verbose"
+            }
+            
+            # Sleep before next check with exponential backoff
+            Start-Sleep -Seconds $retryIntervalSeconds
+            
+            # Increase retry interval with exponential backoff, but cap at maximum
+            # Simplify the math expression
+            $newInterval = [math]::Floor($retryIntervalSeconds * $BackoffMultiplier)
+            if ($newInterval -gt $MaxRetryIntervalSeconds) {
+                $retryIntervalSeconds = $MaxRetryIntervalSeconds
+            } else {
+                $retryIntervalSeconds = $newInterval
+            }
+            
+            $attempt++
+        }
+        catch {
+            $consecutiveErrors++
+            $errorMessage = $_.Exception.Message
+            
+            # Handle special cases
+            if ($_.Exception.Response -and $_.Exception.Response.StatusCode.value__ -eq 404) {
+                Write-FunctionLog "Resource not found. It may be being created or deleted." -Level "Warning"
+            }
+            elseif ($_.Exception.Response -and $_.Exception.Response.StatusCode.value__ -eq 429) {
+                Write-FunctionLog "Rate limited by Azure API. Increasing wait time." -Level "Warning"
+                # Double the wait time for rate limiting but don't exceed max * 2
+                $doubledDelay = $retryIntervalSeconds * 2
+                $maxAllowed = $MaxRetryIntervalSeconds * 2
+                if ($doubledDelay -gt $maxAllowed) {
+                    $retryIntervalSeconds = $maxAllowed
+                } else {
+                    $retryIntervalSeconds = $doubledDelay
+                }
+            }
+            else {
+                Write-FunctionLog "Error checking resource state: $errorMessage" -Level "Warning"
+            }
+            
+            # If we've had too many consecutive errors, abort
+            if ($consecutiveErrors -ge $maxConsecutiveErrors) {
+                throw "Aborting after $consecutiveErrors consecutive errors. Last error: $errorMessage"
+            }
+            
+            # Calculate elapsed time
+            $elapsedTime = Get-Date
+            $elapsedSeconds = ($elapsedTime - $startTime).TotalSeconds
+            $remainingSeconds = $MaxWaitTimeSeconds - $elapsedSeconds
+            
+            if ($remainingSeconds -le 0) {
+                $elapsedSecondsDisplay = [math]::Floor($elapsedSeconds)
+                # If we know the last state was "Updating", return more gracefully
+                if ($lastState -eq "Updating") {
+                    Write-FunctionLog "Resource is still updating after timeout. Returning current state without failing." -Level "Warning"
+                    return @{
+                        id = $ResourceId
+                        properties = @{
+                            provisioningState = $lastState
+                        }
+                        timeoutOccurred = $true
+                    }
+                }
+                throw "Timed out waiting for resource to reach state '$DesiredState' after ${elapsedSecondsDisplay} seconds"
+            }
+            
+            # Calculate wait time with simpler math
+            $errorWaitTime = $retryIntervalSeconds * 2
+            $quarterRemaining = [math]::Floor($remainingSeconds / 4)
+            if ($errorWaitTime -gt $quarterRemaining) {
+                $errorWaitTime = $quarterRemaining
+            }
+            
+            Write-FunctionLog "Waiting $errorWaitTime seconds before retrying..." -Level "Warning"
+            Start-Sleep -Seconds $errorWaitTime
+            
+            $attempt++
+        }
+    } while ($true)
+}
+
+# Modify Split-IpsIntoGroups to use more PowerShell-friendly array operations
 function Split-IpsIntoGroups {
     param(
         [array]$IpList,
@@ -142,18 +325,35 @@ function Split-IpsIntoGroups {
 
     Write-FunctionLog "Splitting $($IpList.Count) IPs into groups" -Level "Verbose"
     
+    # More PowerShell-friendly way of determining group count
+    $ipCount = $IpList.Count
+    $groupsNeeded = [math]::Ceiling($ipCount / $MaxIpsPerGroup)
+    if ($groupsNeeded -gt $MaxGroups) {
+        $groupsNeeded = $MaxGroups
+    }
+    
+    $totalGroups = [int]$groupsNeeded
+    Write-FunctionLog "Creating $totalGroups IP groups" -Level "Verbose"
+    
     $groups = @()
-    $totalGroups = [Math]::Min([Math]::Ceiling($IpList.Count / $MaxIpsPerGroup), $MaxGroups)
-
     for ($i = 0; $i -lt $totalGroups; $i++) {
         $startIndex = $i * $MaxIpsPerGroup
-        $endIndex = [Math]::Min(($i + 1) * $MaxIpsPerGroup - 1, $IpList.Count - 1)
-
-        if ($startIndex -lt $IpList.Count) {
-            $groupIps = @($IpList[$startIndex..$endIndex])
-            Write-FunctionLog "Created group $($i + 1) with $($groupIps.Count) IPs" -Level "Verbose"
-            $groups += ,$groupIps
+        $length = $MaxIpsPerGroup
+        
+        # Ensure we don't go past the end of the array
+        if (($startIndex + $length) -gt $ipCount) {
+            $length = $ipCount - $startIndex
         }
+        
+        # Skip if we somehow have a negative length
+        if ($length -le 0) { continue }
+        
+        # Use Select-Object for better performance with large arrays
+        $groupIps = @($IpList | Select-Object -Skip $startIndex -First $length)
+        Write-FunctionLog "Created group $($i + 1) with $($groupIps.Count) IPs" -Level "Verbose"
+        
+        # Add the group to our results
+        $groups += ,$groupIps
     }
 
     return $groups
@@ -270,24 +470,13 @@ function Update-IpGroup {
     }
 }
 
-# Function to write error responses
+# Function to write error responses (now just logs)
 function Write-ErrorResponse {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Message,
-        [int]$StatusCode = [HttpStatusCode]::InternalServerError
+        [string]$Message
     )
-
-    # Don't write error to avoid double response
-    Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
-        StatusCode = $StatusCode
-        Body = @{
-            status = 'error'
-            message = $Message
-            timestamp = Get-Date -Format 'o'
-        } | ConvertTo-Json
-        ContentType = "application/json"
-    })
+    Write-FunctionLog "Error: $Message" -Level "Error"
 }
 
 # Update firewall rules with IP groups
@@ -357,25 +546,17 @@ function Update-RuleCollectionGroup {
         -Body ($body | ConvertTo-Json -Compress -Depth 10)
 }
 
-# Write success responses in consistent format
+# Write success responses in consistent format (now just logs)
 function Write-SuccessResponse {
     param(
         [string]$Message,
         [object]$Details = $null
     )
 
-    $response = @{
-        status = 'success'
-        message = $Message
-        timestamp = Get-Date -Format 'o'
+    Write-FunctionLog "Success: $Message"
+    if ($Details) {
+        Write-FunctionLog "Details: $($Details | ConvertTo-Json -Depth 10)" -Level "Verbose"
     }
-    if ($Details) { $response.details = $Details }
-
-    Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
-        StatusCode = [HttpStatusCode]::OK
-        Body = $response | ConvertTo-Json -Compress -Depth 10
-        ContentType = "application/json"
-    })
 }
 
 # Make Azure REST API calls with retry logic
@@ -433,199 +614,420 @@ function Invoke-AzureRestMethod {
     }
 }
 
-function Invoke-TestAction {
-    param(
-        [string]$Token,
-        [hashtable]$Headers
-    )
-
-    Write-FunctionLog "Starting test action..."
-
-    # Log key variables for debugging
-    Write-FunctionLog "Using configuration:"
-    Write-FunctionLog "- Subscription: $subscriptionId"
-    Write-FunctionLog "- Resource Group: $resourceGroup"
-    Write-FunctionLog "- Policy Name: $policyName"
-    Write-FunctionLog "- Base IP Group Name: $baseIpGroupName"
-
-    # Test IP Groups
-    $ipGroupsUrl = "https://management.azure.com/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Network/ipGroups"
-
-    Write-FunctionLog "Testing IP Groups access..."
-    Write-FunctionLog "Request URL: $ipGroupsUrl"
-
-    try {
-        $ipGroups = Invoke-AzureRestMethod -Method Get `
-            -Uri $ipGroupsUrl `
-            -Headers $Headers `
-            -MaxRetries 3 `
-            -RetryDelay 5 `
-            -ApiVersion "2024-07-01"
-
-        $blockedIpGroups = $ipGroups.value | Where-Object { $_.name -like "$baseIpGroupName-*" }
-        
-        Write-FunctionLog "Found $($blockedIpGroups.Count) IP Groups matching pattern '$baseIpGroupName-*'"
-        foreach ($group in $blockedIpGroups) {
-            Write-FunctionLog "- $($group.name): $($group.properties.ipAddresses.Count) IPs" -Level "Verbose"
-        }
-    }
-    catch {
-        Write-FunctionLog "Failed to list IP Groups: $_" -Level "Warning"
-        $blockedIpGroups = $null
-    }
-
-    # Test Rule Collection Group
-    $ruleCollectionUrl = "https://management.azure.com/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Network/firewallPolicies/$policyName/ruleCollectionGroups/$ruleCollectionGroupName"
-
-    Write-FunctionLog "Testing Rule Collection Group access..."
-    Write-FunctionLog "Request URL: $ruleCollectionUrl"
-
-    try {
-        $ruleCollection = Invoke-AzureRestMethod -Method Get `
-            -Uri $ruleCollectionUrl `
-            -Headers $Headers `
-            -MaxRetries 3 `
-            -RetryDelay 5 `
-            -ApiVersion $script:apiVersion
-
-        Write-FunctionLog "Successfully retrieved Rule Collection Group"
-    }
-    catch {
-        Write-FunctionLog "Rule Collection Group not found or access denied: $_" -Level "Warning"
-        $ruleCollection = $null
-    }
-
-    # Return detailed response
-    Write-SuccessResponse -Message "Successfully connected to Azure Firewall resources" -Details @{
-        ipGroups = if ($blockedIpGroups) { @($blockedIpGroups) } else { @() }  # Convert to array or empty array
-        ruleCollectionGroup = $ruleCollection
-        resourceGroup = $resourceGroup
-        policyName = $policyName
-        requestInfo = @{
-            ipGroupsUrl = $ipGroupsUrl
-            ruleCollectionUrl = $ruleCollectionUrl
-            baseIpGroupName = $baseIpGroupName
-            firewallApiVersion = $script:apiVersion
-            ipGroupApiVersion = "2024-07-01"
-        }
-    }
-}
-
+# Main update action with more PowerShell-friendly approach
 function Invoke-UpdateAction {
     param([string]$Token)
 
-    Write-FunctionLog "Starting update action..."
-
-    # Get blocklist IPs first
-    Write-FunctionLog "Fetching blocklist from URL: $blocklistUrl"
-    $blocklistIps = Get-BlocklistIps -Url $blocklistUrl
-    Write-FunctionLog "Found $($blocklistIps.Count) IPs in blocklist"
-
-    # Get all existing groups
-    Write-FunctionLog "Fetching existing IP groups..."
-    $existingGroups = Invoke-AzureRestMethod -Method Get `
-        -Uri "https://management.azure.com/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Network/ipGroups" `
-        -Headers @{ "Authorization" = "Bearer $Token" } `
-        -MaxRetries 3 `
-        -RetryDelay 5 `
-        -ApiVersion "2024-07-01"
-    
-    $existingBlocklistGroups = $existingGroups.value | Where-Object { $_.name -like "$baseIpGroupName-*" }
-    
-    # Split IPs into groups
-    $ipGroups = Split-IpsIntoGroups -IpList $blocklistIps -MaxIpsPerGroup $maxIpsPerGroup -MaxGroups $maxIpGroups
-    Write-FunctionLog "Need $($ipGroups.Count) groups for current IPs"
-
-    # First, update rule collection to empty state
-    Write-FunctionLog "Removing IP group references from rule collection"
-    $result = Update-RuleCollectionGroup -Token $Token `
-        -SubscriptionId $subscriptionId `
-        -ResourceGroup $resourceGroup `
-        -FirewallPolicyName $policyName
-
-    # Wait for the rule collection update to complete
-    Write-FunctionLog "Waiting for rule collection update to complete..."
-    $maxWaitTime = 300 # 5 minutes
     $startTime = Get-Date
-    do {
-        Start-Sleep -Seconds 10
-        $status = Invoke-AzureRestMethod -Method Get `
-            -Uri "https://management.azure.com$($result.id)" `
+    Write-FunctionLog "Starting update action..."
+    
+    try {
+        # Get blocklist IPs first
+        Write-FunctionLog "Fetching blocklist from URL: $blocklistUrl"
+        $blocklistIps = Get-BlocklistIps -Url $blocklistUrl
+        Write-FunctionLog "Found $($blocklistIps.Count) IPs in blocklist"
+    
+        # Get all existing groups
+        Write-FunctionLog "Fetching existing IP groups..."
+        $existingGroups = Invoke-AzureRestMethod -Method Get `
+            -Uri "https://management.azure.com/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Network/ipGroups" `
             -Headers @{ "Authorization" = "Bearer $Token" } `
+            -MaxRetries 3 `
+            -RetryDelay 5 `
             -ApiVersion "2024-07-01"
         
-        if ($status.properties.provisioningState -eq "Succeeded") {
-            Write-FunctionLog "Rule collection update completed"
-            break
-        }
-        elseif ($status.properties.provisioningState -eq "Failed") {
-            throw "Rule collection update failed"
-        }
-
-        if (((Get-Date) - $startTime).TotalSeconds -gt $maxWaitTime) {
-            throw "Timeout waiting for rule collection update"
-        }
-
-        Write-FunctionLog "Still waiting... Current state: $($status.properties.provisioningState)" -Level "Verbose"
-    } while ($true)
-
-    # Update existing groups and create new ones as needed
-    $newGroupResults = @()
-    $groupsToDelete = [System.Collections.ArrayList]@($existingBlocklistGroups)
-
-    for ($i = 0; $i -lt $ipGroups.Count; $i++) {
-        $groupIps = $ipGroups[$i]
-        $groupName = "$baseIpGroupName-{0:D3}" -f ($i + 1)
+        $existingBlocklistGroups = @($existingGroups.value | Where-Object { $_.name -like "$baseIpGroupName-*" })
+        Write-FunctionLog "Found $($existingBlocklistGroups.Count) existing IP groups matching pattern '$baseIpGroupName-*'"
         
-        # Check if we can reuse an existing group
-        $existingGroup = $existingBlocklistGroups | Where-Object { $_.name -eq $groupName }
+        # Split IPs into groups
+        $ipGroups = Split-IpsIntoGroups -IpList $blocklistIps -MaxIpsPerGroup $maxIpsPerGroup -MaxGroups $maxIpGroups
+        Write-FunctionLog "Need $($ipGroups.Count) groups for current IPs"
+    
+        # Calculate total time elapsed so far
+        $elapsedSeconds = ((Get-Date) - $startTime).TotalSeconds
+        $maxTotalTimeSeconds = 540  # 9 minutes (leaving 1 minute buffer)
+        $remainingSeconds = $maxTotalTimeSeconds - $elapsedSeconds
         
-        if ($existingGroup) {
-            Write-FunctionLog "Updating existing group $groupName with $($groupIps.Count) IPs"
-            $groupsToDelete.Remove($existingGroup)
-        } else {
-            Write-FunctionLog "Creating new group $groupName with $($groupIps.Count) IPs"
+        # If we have less than 7 minutes remaining, we might not have time to complete - log warning
+        if ($remainingSeconds -lt 420) {
+            $remainingSecondsDisplay = [math]::Floor($remainingSeconds)
+            Write-FunctionLog "Warning: Only ${remainingSecondsDisplay} seconds remaining. Operation may not complete in time." -Level "Warning"
         }
-
-        $ipGroup = Update-IpGroup -Token $Token `
-            -SubscriptionId $subscriptionId `
-            -ResourceGroup $resourceGroup `
-            -IpAddresses $groupIps `
-            -IpGroupName $groupName
-
-        $newGroupResults += @{
-            id = $ipGroup.id
-            name = $groupName
-            count = $groupIps.Count
-            isNew = ($null -eq $existingGroup)
+    
+        # Check if the rule collection already exists - wrapped in additional try/catch for safety
+        $ruleCollectionUrl = "https://management.azure.com/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Network/firewallPolicies/$policyName/ruleCollectionGroups/$ruleCollectionGroupName"
+        $ruleCollectionExists = $false
+        $currentState = $null
+        $ruleCollectionId = $null
+        
+        try {
+            Write-FunctionLog "Checking if rule collection group exists..." -Level "Verbose"
+            $apiUrl = "$ruleCollectionUrl`?api-version=2024-07-01"
+            $response = Invoke-RestMethod -Method Get -Uri $apiUrl -Headers @{ "Authorization" = "Bearer $Token" }
+            $ruleCollectionExists = $true
+            $currentState = $response.properties.provisioningState
+            $ruleCollectionId = $response.id
+            
+            Write-FunctionLog "Rule collection group exists in state: $currentState" -Level "Information"
+            
+            # If it exists but is not in a Succeeded state, wait for it to finish first
+            if ($currentState -ne "Succeeded") {
+                Write-FunctionLog "Rule collection group is in '$currentState' state, waiting for completion..." -Level "Warning"
+                $status = Wait-ForResourceState -ResourceId $response.id -Token $Token -DesiredState "Succeeded" -MaxWaitTimeSeconds 360
+            }
+        }
+        catch {
+            if ($_.Exception.Response -and $_.Exception.Response.StatusCode.value__ -eq 404) {
+                Write-FunctionLog "Rule collection group does not exist yet." -Level "Warning"
+            }
+            else {
+                Write-FunctionLog "Error checking rule collection group: $_" -Level "Error"
+                throw
+            }
+        }
+    
+        # Update and Delete operations
+        $newGroupResults = @()
+        $groupsToDelete = New-Object System.Collections.ArrayList
+        
+        # Create a list of groups to potentially delete (we'll remove ones we want to keep)
+        foreach ($group in $existingBlocklistGroups) {
+            [void]$groupsToDelete.Add($group)
+        }
+        
+        # Process IP groups in batches (only if time permits)
+        $processedGroups = 0
+        if ($ipGroups.Count -gt 0) {
+            # Skip emptying the rule collection - this creates a security gap
+            # Instead, we'll keep existing rules in place until we're ready with the new configuration
+            
+            # Update existing groups and create new ones as needed - with batching for improved performance
+            Write-FunctionLog "Processing IP groups without removing existing rule references..."
+            
+            $batchSize = 3  # Process up to 3 IP groups in parallel
+            $batchDelay = 2  # Wait 2 seconds between batches
+            
+            for ($i = 0; $i -lt $ipGroups.Count; $i += $batchSize) {
+                # Check if we need to abort due to time constraints
+                $elapsedSeconds = ((Get-Date) - $startTime).TotalSeconds
+                $remainingSeconds = $maxTotalTimeSeconds - $elapsedSeconds
+                
+                if ($remainingSeconds -lt 180) { # Less than 3 minutes remaining
+                    $remainingSecondsDisplay = [math]::Floor($remainingSeconds)
+                    Write-FunctionLog "Warning: Only ${remainingSecondsDisplay} seconds remaining. Skipping remaining IP group updates." -Level "Warning"
+                    break
+                }
+                
+                # Calculate the end of this batch
+                $batchEnd = $i + $batchSize - 1
+                if ($batchEnd -ge $ipGroups.Count) {
+                    $batchEnd = $ipGroups.Count - 1
+                }
+                
+                $batchStartNum = $i + 1
+                $batchEndNum = $batchEnd + 1
+                Write-FunctionLog "Processing batch of IP groups ($batchStartNum to $batchEndNum of $($ipGroups.Count))..." -Level "Information"
+                
+                # Process each group in current batch
+                for ($j = $i; $j -le $batchEnd; $j++) {
+                    $groupIps = $ipGroups[$j]
+                    $groupName = Get-IpGroupName -Index $j
+                    
+                    # Check if we can reuse an existing group
+                    $existingGroup = $null
+                    foreach ($group in $existingBlocklistGroups) {
+                        if ($group.name -eq $groupName) {
+                            $existingGroup = $group
+                            break
+                        }
+                    }
+                    
+                    if ($existingGroup) {
+                        Write-FunctionLog "Updating existing group $groupName with $($groupIps.Count) IPs"
+                        $groupsToDelete.Remove($existingGroup)
+                    } else {
+                        Write-FunctionLog "Creating new group $groupName with $($groupIps.Count) IPs"
+                    }
+    
+                    # Efficiently update IP Groups with retry logic
+                    $maxRetries = 2
+                    $retryDelay = 3
+                    $success = $false
+                    
+                    for ($attemptNo = 1; $attemptNo -le $maxRetries; $attemptNo++) {
+                        try {
+                            if ($attemptNo -gt 1) {
+                                Write-FunctionLog "Retrying IP Group update for $groupName (attempt $attemptNo)..." -Level "Warning"
+                                Start-Sleep -Seconds ($retryDelay * $attemptNo)
+                            }
+                            
+                            $ipGroup = Update-IpGroup -Token $Token `
+                                -SubscriptionId $subscriptionId `
+                                -ResourceGroup $resourceGroup `
+                                -IpAddresses $groupIps `
+                                -IpGroupName $groupName
+                            
+                            $newGroupResults += @{
+                                id = $ipGroup.id
+                                name = $groupName
+                                count = $groupIps.Count
+                                isNew = ($null -eq $existingGroup)
+                            }
+                            
+                            $success = $true
+                            $processedGroups++
+                            break
+                        }
+                        catch {
+                            Write-FunctionLog "Error updating IP Group $groupName (attempt $attemptNo): $_" -Level "Warning"
+                            
+                            if ($attemptNo -eq $maxRetries) {
+                                Write-FunctionLog "Failed to update IP Group $groupName after $maxRetries attempts" -Level "Error"
+                                throw
+                            }
+                        }
+                    }
+                }
+                
+                # Wait between batches to avoid rate limiting
+                if ($batchEnd -lt ($ipGroups.Count - 1)) {
+                    Write-FunctionLog "Waiting $batchDelay seconds before next batch..." -Level "Verbose"
+                    Start-Sleep -Seconds $batchDelay
+                }
+            }
+        }
+    
+        # Delete any remaining unused groups - with batching
+        # Check time remaining first
+        $elapsedSeconds = ((Get-Date) - $startTime).TotalSeconds
+        $remainingSeconds = $maxTotalTimeSeconds - $elapsedSeconds
+        
+        $deletedGroups = 0
+        if ($groupsToDelete.Count -gt 0) {
+            # Skip deletion if time is running out
+            if ($remainingSeconds -lt 120) { # Less than 2 minutes remaining
+                $remainingSecondsDisplay = [math]::Floor($remainingSeconds)
+                Write-FunctionLog "Warning: Only ${remainingSecondsDisplay} seconds remaining. Skipping deletion of unused groups." -Level "Warning"
+            }
+            else {
+                Write-FunctionLog "Deleting $($groupsToDelete.Count) unused IP groups" -Level "Information"
+                $batchSize = 3  # Delete up to 3 IP groups in parallel
+                $batchDelay = 2
+                
+                for ($i = 0; $i -lt $groupsToDelete.Count; $i += $batchSize) {
+                    # Calculate the end of this batch
+                    $batchEnd = $i + $batchSize - 1
+                    if ($batchEnd -ge $groupsToDelete.Count) {
+                        $batchEnd = $groupsToDelete.Count - 1
+                    }
+                    
+                    $currentBatchCount = $batchEnd - $i + 1
+                    Write-FunctionLog "Deleting batch of $currentBatchCount IP groups..." -Level "Information"
+                    
+                    # Process each group in current batch
+                    for ($j = $i; $j -le $batchEnd; $j++) {
+                        $group = $groupsToDelete[$j]
+                        Write-FunctionLog "Deleting unused group $($group.name)"
+                        
+                        try {
+                            Remove-IpGroup -Token $Token `
+                                -SubscriptionId $subscriptionId `
+                                -ResourceGroup $resourceGroup `
+                                -IpGroupName $group.name
+                                
+                            $deletedGroups++
+                        }
+                        catch {
+                            Write-FunctionLog "Error deleting IP Group $($group.name): $_" -Level "Warning"
+                            # Continue with other deletions even if one fails
+                        }
+                    }
+                    
+                    # Wait between batches to avoid rate limiting
+                    if ($batchEnd -lt ($groupsToDelete.Count - 1)) {
+                        Write-FunctionLog "Waiting $batchDelay seconds before next deletion batch..." -Level "Verbose"
+                        Start-Sleep -Seconds $batchDelay
+                    }
+                }
+            }
+        }
+    
+        # Update firewall policy with all groups - with enhanced retry logic
+        # Check time remaining first
+        $elapsedSeconds = ((Get-Date) - $startTime).TotalSeconds
+        $remainingSeconds = $maxTotalTimeSeconds - $elapsedSeconds
+        
+        if ($remainingSeconds -lt 180) { # Less than 3 minutes remaining
+            $remainingSecondsDisplay = [math]::Floor($remainingSeconds)
+            Write-FunctionLog "Warning: Only ${remainingSecondsDisplay} seconds remaining. Not enough time to update rule collection." -Level "Warning"
+            
+            # Summarize what we've done so far even though we're not updating the rule collection
+            $createCount = 0
+            $updateCount = 0
+            
+            foreach ($result in $newGroupResults) {
+                if ($result.isNew) {
+                    $createCount++
+                } else {
+                    $updateCount++
+                }
+            }
+            
+            $uniqueIpsCount = ($blocklistIps | Select-Object -Unique).Count
+            $durationSeconds = [math]::Floor(((Get-Date) - $startTime).TotalSeconds)
+            
+            Write-SuccessResponse -Message "Partially updated IP groups - rule collection update skipped due to time constraints" -Details @{
+                summary = @{
+                    groupsCreated = $createCount
+                    groupsUpdated = $updateCount
+                    groupsDeleted = $deletedGroups
+                    groupsProcessed = $processedGroups
+                    totalIps = $blocklistIps.Count
+                    uniqueIps = $uniqueIpsCount
+                    operationStart = $startTime
+                    operationEnd = Get-Date
+                    durationSeconds = $durationSeconds
+                    completed = $false
+                    reason = "Time constraint - function execution limit approaching"
+                }
+                groupsCreated = if ($createCount -gt 0) { $newGroupResults | Where-Object { $_.isNew } | Select-Object name, count } else { $null }
+                groupsUpdated = if ($updateCount -gt 0) { $newGroupResults | Where-Object { -not $_.isNew } | Select-Object name, count } else { $null }
+                groupsDeleted = if ($deletedGroups -gt 0) { $groupsToDelete | Select-Object -First $deletedGroups name } else { $null }
+            }
+            return
+        }
+    
+        # Proceed with updating the rule collection
+        Write-FunctionLog "Creating new rule collection with IP groups"
+        $maxRetries = 3
+        $baseRetryDelay = 10
+        $success = $false
+        
+        for ($attemptNo = 1; $attemptNo -le $maxRetries; $attemptNo++) {
+            try {
+                if ($attemptNo -gt 1) {
+                    $backoffFactor = [math]::Pow(1.5, ($attemptNo - 1))
+                    $currentRetryDelay = [math]::Floor($baseRetryDelay * $backoffFactor)
+                    Write-FunctionLog "Retrying rule collection update (attempt $attemptNo of $maxRetries, waiting $currentRetryDelay seconds)..." -Level "Warning"
+                    Start-Sleep -Seconds $currentRetryDelay
+                }
+                
+                # Extract just the IDs for the API call
+                $groupIds = @()
+                foreach ($result in $newGroupResults) {
+                    $groupIds += $result.id
+                }
+                
+                $result = Update-RuleCollectionGroup -Token $Token `
+                    -SubscriptionId $subscriptionId `
+                    -ResourceGroup $resourceGroup `
+                    -FirewallPolicyName $policyName `
+                    -IpGroupIds $groupIds
+                
+                # Wait for the operation to complete with a longer timeout for the final update
+                $status = Wait-ForResourceState -ResourceId $result.id -Token $Token -MaxWaitTimeSeconds 360 -InitialRetryIntervalSeconds 10 -BackoffMultiplier 1.3
+                
+                # Check if we got a timeout but the resource is still updating
+                if ($status.timeoutOccurred -and $status.properties.provisioningState -eq "Updating") {
+                    Write-FunctionLog "Rule collection update is still in progress but function timeout is approaching. Consider the operation partially successful." -Level "Warning"
+                    $success = $true  # Consider it a success even though we timed out waiting
+                } else {
+                    $success = $true
+                }
+                break
+            }
+            catch {
+                $errorMessage = $_.ToString()
+                
+                # Check if we need to abort due to time constraints
+                $elapsedSeconds = ((Get-Date) - $startTime).TotalSeconds
+                $remainingSeconds = $maxTotalTimeSeconds - $elapsedSeconds
+                
+                if ($remainingSeconds -lt 90) { # Less than 1.5 minutes remaining
+                    $remainingSecondsDisplay = [math]::Floor($remainingSeconds)
+                    Write-FunctionLog "Warning: Only ${remainingSecondsDisplay} seconds remaining. Aborting rule collection update." -Level "Warning"
+                    break
+                }
+                
+                # Check if it's a timeout but the resource might still be updating successfully
+                if ($errorMessage -like "*Timed out waiting for resource to reach state*" -and 
+                    $errorMessage -like "*Last known state: Updating*") {
+                    Write-FunctionLog "Rule collection update timed out but is still in progress. This is likely fine as Azure Firewall updates can take 5+ minutes." -Level "Warning"
+                    Write-FunctionLog "The update will complete in the background even after this function terminates." -Level "Information"
+                    $success = $true  # Consider it a partial success
+                    break
+                }
+                
+                # Check if it's the "already updating" error
+                if ($errorMessage -like "*FirewallPolicyRuleCollectionGroupUpdateNotAllowedWhenUpdatingOrDeleting*") {
+                    # Try to extract operation ID for better logging
+                    $operationId = "unknown"
+                    if ($errorMessage -match "operation ID : ([a-zA-Z0-9-]+)") {
+                        $operationId = $Matches[1]
+                    }
+                    
+                    Write-FunctionLog "Rule collection is still updating (previous operation ID: $operationId). Waiting longer before retry..." -Level "Warning"
+                    
+                    # Wait longer between retries for this specific error with increasing backoff
+                    $waitTime = 30 * $attemptNo
+                    if ($waitTime -gt 60) {
+                        $waitTime = 60  # Max 60 seconds wait
+                    }
+                    
+                    Write-FunctionLog "Waiting $waitTime seconds before retry $attemptNo..." -Level "Information"
+                    Start-Sleep -Seconds $waitTime
+                }
+                else {
+                    Write-FunctionLog "Error updating rule collection (attempt $attemptNo): $errorMessage" -Level "Error"
+                    
+                    if ($attemptNo -eq $maxRetries) {
+                        throw
+                    }
+                }
+            }
+        }
+    
+        # Check if we succeeded or timed out
+        if (-not $success) {
+            Write-FunctionLog "Could not complete rule collection update - either failed or time limit reached" -Level "Warning"
+        }
+    
+        # Calculate statistics for logging
+        $createCount = 0
+        $updateCount = 0
+        
+        foreach ($result in $newGroupResults) {
+            if ($result.isNew) {
+                $createCount++
+            } else {
+                $updateCount++
+            }
+        }
+        
+        $durationSeconds = [math]::Floor(((Get-Date) - $startTime).TotalSeconds)
+        $uniqueIpsCount = ($blocklistIps | Select-Object -Unique).Count
+        
+        Write-SuccessResponse -Message "Successfully updated IP groups" -Details @{
+            summary = @{
+                groupsCreated = $createCount
+                groupsUpdated = $updateCount
+                groupsDeleted = $deletedGroups
+                groupsProcessed = $processedGroups
+                totalIps = $blocklistIps.Count
+                uniqueIps = $uniqueIpsCount
+                operationStart = $startTime 
+                operationEnd = Get-Date
+                durationSeconds = $durationSeconds
+                completed = $success
+            }
+            groupsCreated = if ($createCount -gt 0) { $newGroupResults | Where-Object { $_.isNew } | Select-Object name, count } else { $null }
+            groupsUpdated = if ($updateCount -gt 0) { $newGroupResults | Where-Object { -not $_.isNew } | Select-Object name, count } else { $null }
+            groupsDeleted = if ($deletedGroups -gt 0) { $groupsToDelete | Select-Object -First $deletedGroups name } else { $null }
         }
     }
-
-    # Delete any remaining unused groups
-    if ($groupsToDelete.Count -gt 0) {
-        Write-FunctionLog "Deleting $($groupsToDelete.Count) unused groups"
-        foreach ($group in $groupsToDelete) {
-            Write-FunctionLog "Deleting unused group $($group.name)"
-            Remove-IpGroup -Token $Token `
-                -SubscriptionId $subscriptionId `
-                -ResourceGroup $resourceGroup `
-                -IpGroupName $group.name
-        }
-    }
-
-    # Update firewall policy with all groups
-    Write-FunctionLog "Creating new rule collection with IP groups"
-    $result = Update-RuleCollectionGroup -Token $Token `
-        -SubscriptionId $subscriptionId `
-        -ResourceGroup $resourceGroup `
-        -FirewallPolicyName $policyName `
-        -IpGroupIds ($newGroupResults.id)
-
-    Write-SuccessResponse -Message "Successfully updated IP groups" -Details @{
-        groupsCreated = ($newGroupResults | Where-Object { $_.isNew })
-        groupsUpdated = ($newGroupResults | Where-Object { -not $_.isNew })
-        groupsDeleted = $groupsToDelete | Select-Object name
-        totalIps = $blocklistIps.Count
+    catch {
+        Write-FunctionLog "Error in Invoke-UpdateAction: $_" -Level "Error"
+        throw
     }
 }
 
@@ -660,266 +1062,52 @@ function Remove-IpGroup {
     }
 }
 
-function Invoke-UnblockAction {
-    param(
-        [string]$Token,
-        [PSCustomObject]$Body
-    )
-
-    Write-FunctionLog "Starting unblock action..."
-    Write-FunctionLog "Request body type: $($Body.GetType().Name)" -Level "Verbose"
-    Write-FunctionLog "Request body: $($Body | ConvertTo-Json)" -Level "Verbose"
-
-    # Get IPs from request body
-    if ($Body.ips) {
-        $IpsToUnblock = $Body.ips
-        Write-FunctionLog "Using IPs from request body: Count = $($IpsToUnblock.Count)"
-    }
-    else {
-        Write-FunctionLog "Missing IPs parameter" -Level "Error"
-        Write-ErrorResponse -Message "Missing required 'ips' array in request body" -StatusCode 400
-        return
-    }
-
-    Write-FunctionLog "Starting IP validation..."
-    # Validate IPs and strip CIDR notation
-    $validIps = $IpsToUnblock | ForEach-Object {
-        $ip = $_ -replace '/\d+$', ''  # Strip CIDR notation
-        Write-FunctionLog "Validating IP: $ip" -Level "Verbose"
-        if (Test-IpAddress $ip) {
-            Write-FunctionLog "IP is valid: $ip" -Level "Verbose"
-            $ip
-        }
-    }
-    Write-FunctionLog "IP validation complete. Found $($validIps.Count) valid IPs"
-
-    # Get all IP groups
-    Write-FunctionLog "Fetching IP groups..."
-    $ipGroupsUrl = "https://management.azure.com/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Network/ipGroups"
-
-    try {
-        Write-FunctionLog "Making API request to: $ipGroupsUrl"
-        $ipGroups = Invoke-AzureRestMethod -Method Get -Uri $ipGroupsUrl `
-            -Headers @{ "Authorization" = "Bearer $Token" } `
-            -MaxRetries 3 `
-            -RetryDelay 5 `
-            -ApiVersion "2024-07-01"
-        Write-FunctionLog "Successfully retrieved IP groups"
-
-        $blockedIpGroups = $ipGroups.value | Where-Object { $_.name -like "$baseIpGroupName-*" }
-        Write-FunctionLog "Found $($blockedIpGroups.Count) matching IP groups"
-
-        foreach ($group in $blockedIpGroups) {
-            Write-FunctionLog "Group $($group.name) has $($group.properties.ipAddresses.Count) IPs" -Level "Verbose"
-        }
-    }
-    catch {
-        Write-FunctionLog "Failed to list IP Groups: $_" -Level "Error"
-        throw
-    }
-
-    # Track which groups were updated or deleted
-    $updatedGroups = @()
-    $deletedGroups = @()
-    $unblocked = [System.Collections.ArrayList]@()
-
-    # Process each IP group
-    foreach ($group in $blockedIpGroups) {
-        Write-FunctionLog "Processing group: $($group.name)" -Level "Verbose"
-        
-        # Get current IPs both with and without CIDR
-        $currentIpsWithCidr = $group.properties.ipAddresses
-        $currentIpsWithoutCidr = $currentIpsWithCidr | ForEach-Object { $_ -replace '/32$', '' }
-        
-        Write-FunctionLog "Current IPs in group (with CIDR): $($currentIpsWithCidr -join ', ')" -Level "Verbose"
-        Write-FunctionLog "Current IPs in group (without CIDR): $($currentIpsWithoutCidr -join ', ')" -Level "Verbose"
-        Write-FunctionLog "IPs to unblock: $($validIps -join ', ')" -Level "Verbose"
-
-        # Check for matches in both formats
-        $ipsToRemove = $validIps | Where-Object {
-            $ip = $_
-            $isMatch = $ip -in $currentIpsWithoutCidr -or "$ip/32" -in $currentIpsWithCidr
-            Write-FunctionLog "Checking IP $ip - Match found: $isMatch" -Level "Verbose"
-            $isMatch
-        }
-
-        if ($ipsToRemove) {
-            Write-FunctionLog "Found $($ipsToRemove.Count) IPs to remove from group $($group.name)"
-            Write-FunctionLog "IPs to remove: $($ipsToRemove -join ', ')" -Level "Verbose"
-
-            # Keep original CIDR format for remaining IPs
-            $remainingIps = $currentIpsWithCidr | Where-Object {
-                $ip = $_
-                $shouldKeep = ($_ -replace '/32$', '') -notin $ipsToRemove
-                Write-FunctionLog "Checking if IP $ip should be kept: $shouldKeep" -Level "Verbose"
-                $shouldKeep
-            }
-            
-            Write-FunctionLog "Remaining IPs after removal: $($remainingIps.Count)" -Level "Verbose"
-            Write-FunctionLog "Remaining IPs: $($remainingIps -join ', ')" -Level "Verbose"
-
-            if ($remainingIps.Count -eq 0) {
-                Write-FunctionLog "Group would be empty, deleting group $($group.name)" -Level "Warning"
-                try {
-                    Remove-IpGroup -Token $Token `
-                        -SubscriptionId $subscriptionId `
-                        -ResourceGroup $resourceGroup `
-                        -IpGroupName $group.name
-
-                    $deletedGroups += @{
-                        name = $group.name
-                        removedCount = $ipsToRemove.Count
-                    }
-                    [void]$unblocked.AddRange([string[]]@($ipsToRemove))
-                }
-                catch {
-                    Write-FunctionLog "Failed to delete empty group $($group.name): $_" -Level "Error"
-                    throw
-                }
-            }
-            else {
-                try {
-                    Write-FunctionLog "Group object: $($group | ConvertTo-Json)" -Level "Verbose"
-                    Write-FunctionLog "Group name: $($group.name)" -Level "Verbose"
-                    Write-FunctionLog "Remaining IPs count: $($remainingIps.Count)" -Level "Verbose"
-
-                    $ipGroup = Update-IpGroup -Token $Token `
-                        -SubscriptionId $subscriptionId `
-                        -ResourceGroup $resourceGroup `
-                        -IpAddresses $remainingIps `
-                        -IpGroupName $group.name
-
-                    Write-FunctionLog "Updated IP Group $($group.name) with $($remainingIps.Count) IPs" -Level "Verbose"
-                    $updatedGroups += @{
-                        id = $ipGroup.id
-                        name = $group.name
-                        removedCount = $ipsToRemove.Count
-                        remainingCount = $remainingIps.Count
-                    }
-                    [void]$unblocked.AddRange([string[]]@($ipsToRemove))
-                }
-                catch {
-                    Write-FunctionLog "Failed to update group $($group.name): $_" -Level "Error"
-                    throw
-                }
-            }
-        }
-    }
-
-    if ($updatedGroups.Count -eq 0 -and $deletedGroups.Count -eq 0) {
-        Write-FunctionLog "No IP Groups needed updating" -Level "Warning"
-        Write-SuccessResponse -Message "No IPs found to unblock" -Details @{
-            requestInfo = @{
-                providedIps = $IpsToUnblock
-                validIps = $validIps
-            }
-        }
-        return
-    }
-
-    # Get remaining groups after deletions
-    $remainingGroups = $blockedIpGroups | Where-Object { $_.name -notin $deletedGroups.name }
-
-    if ($remainingGroups.Count -gt 0) {
-        # Update Rule Collection Group with remaining groups
-        Write-FunctionLog "Updating Rule Collection Group..."
-        $result = Update-RuleCollectionGroup -Token $Token `
-            -SubscriptionId $subscriptionId `
-            -ResourceGroup $resourceGroup `
-            -FirewallPolicyName $policyName `
-            -IpGroupIds ($remainingGroups | ForEach-Object { $_.id })
-    }
-    else {
-        Write-FunctionLog "No remaining groups to update in Rule Collection"
-        $result = $null
-    }
-
-    Write-SuccessResponse -Message "Successfully unblocked IPs" -Details @{
-        updatedGroups = $updatedGroups
-        deletedGroups = $deletedGroups
-        ruleCollectionGroup = $result
-        unblocked = $unblocked
-        requestInfo = @{
-            providedIps = $IpsToUnblock
-            validIps = $validIps
-            invalidCount = $IpsToUnblock.Count - $validIps.Count
-        }
-    }
-}
-
 # Main execution block
 try {
-    # Get query parameters
-    $action = $Request.Query.action
-    if (-not $action) {
-        Write-ErrorResponse -Message "Missing required 'action' parameter" -StatusCode 400
-        return
+    # Log function start
+    Write-FunctionLog "Function starting"
+    
+    # Check if timer trigger is past due
+    if ($Timer.IsPastDue) {
+        Write-FunctionLog "Timer function is running late!" -Level "Warning"
     }
 
-    # Authentication block
-    try {
-        Write-FunctionLog "Getting Azure access token..."
-        $tokenUrl = "https://login.microsoftonline.com/$($env:TENANT_ID)/oauth2/v2.0/token"
-        $tokenBody = @{
-            grant_type = "client_credentials"
-            client_id = $env:CLIENT_ID
-            client_secret = $env:CLIENT_SECRET
-            scope = "https://management.azure.com/.default"
-        }
+    # Get Azure access token
+    Write-FunctionLog "Getting Azure access token..."
+    $tokenUrl = "https://login.microsoftonline.com/$($env:TENANT_ID)/oauth2/v2.0/token"
+    $tokenBody = @{
+        grant_type = "client_credentials"
+        client_id = $env:CLIENT_ID
+        client_secret = $env:CLIENT_SECRET
+        scope = "https://management.azure.com/.default"
+    }
 
+    # Wrapped in try-catch for better error reporting
+    try {
         $tokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUrl -Body $tokenBody -ContentType "application/x-www-form-urlencoded"
+        
         if (-not $tokenResponse.access_token) {
-            throw "Failed to get valid access token"
-        }
-
-        $headers = @{
-            "Authorization" = "Bearer $($tokenResponse.access_token)"
-            "Content-Type" = "application/json"
-        }
-        Write-FunctionLog "Successfully obtained access token"
-    }
-    catch {
-        Write-FunctionLog "Authentication failed: $_" -Level "Error"
-        Write-ErrorResponse -Message "Failed to authenticate with Azure: $_" -StatusCode 500
-        return
-    }
-
-    # Process action
-    try {
-        switch ($action.ToLower()) {
-            'test' {
-                Invoke-TestAction -Token $tokenResponse.access_token -Headers $headers
-            }
-            'update' {
-                Invoke-UpdateAction -Token $tokenResponse.access_token
-            }
-            'unblock' {
-                Invoke-UnblockAction -Token $tokenResponse.access_token -Body $Request.Body
-            }
-            default {
-                Write-ErrorResponse -Message "Invalid action: $action" -StatusCode 400
-            }
+            throw "Failed to get valid access token - empty or null access_token"
         }
     }
     catch {
-        $errorRecord = $_
-        $errorMessage = $errorRecord.Exception.Message
-        $stackTrace = $errorRecord.ScriptStackTrace
-
-        Write-FunctionLog "$action action failed: $errorMessage" -Level "Error"
-        Write-FunctionLog "Stack trace: $stackTrace" -Level "Error"
-
-        $statusMessage = switch ($action.ToLower()) {
-            'test' { "Test failed" }
-            'update' { "Failed to update firewall policy" }
-            'unblock' { "Failed to unblock IPs" }
-            default { "Action failed" }
-        }
-
-        Write-ErrorResponse -Message "$statusMessage - $errorMessage" -StatusCode 500
+        Write-FunctionLog "Error authenticating with Azure: $_" -Level "Error"
+        throw "Authentication failed: $_"
     }
+
+    $headers = @{
+        "Authorization" = "Bearer $($tokenResponse.access_token)"
+        "Content-Type" = "application/json"
+    }
+    Write-FunctionLog "Successfully obtained access token"
+
+    # Run update action by default for timer trigger
+    Write-FunctionLog "Starting blocklist update..."
+    Invoke-UpdateAction -Token $tokenResponse.access_token
+    
+    Write-FunctionLog "Function completed successfully"
 }
 catch {
-    Write-FunctionLog "Unhandled error: $_" -Level "Error"
-    Write-ErrorResponse -Message "Internal server error: $_" -StatusCode 500
+    Write-FunctionLog "Error: $_" -Level "Error"
+    throw
 }

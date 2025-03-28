@@ -1,291 +1,138 @@
-# API Reference
+# Azure Firewall Blocklist Integration - Technical Reference
 
-## Base URL
-```
-https://<function-app-name>.azurewebsites.net/api/blocklist
-```
+## Execution Model
 
-## Authentication
-All requests require a function key as the `code` query parameter:
-```
-?code=<function-key>
-```
+This function is timer-triggered and runs automatically on a schedule defined in the function.json configuration file.
 
-## Endpoints
-
-### Test Connection (`action=test`)
-Tests connectivity to Azure resources.
-
-```http
-GET /api/blocklist?action=test&code={function_key}
-```
-
-#### Process Flow
-1. Authenticates with Azure using provided credentials
-2. Attempts to list existing IP Groups matching the base name pattern
-3. Attempts to retrieve the Rule Collection Group configuration
-4. Returns detailed status of each component
-
-#### What It Checks
-- Azure authentication
-- IP Groups access permissions
-- Firewall Policy access permissions
-- Resource Group access
-- Current configuration state
-
-#### Example Response
 ```json
 {
-    "status": "success",
-    "message": "Successfully connected to Azure Firewall resources",
-    "timestamp": "2024-03-05T18:28:15Z",
-    "details": {
-        "ipGroups": [
-            {
-                "name": "fw-blocklist-001",
-                "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/your-rg/providers/Microsoft.Network/ipGroups/fw-blocklist-001",
-                "type": "Microsoft.Network/ipGroups",
-                "location": "eastus",
-                "properties": {
-                    "ipAddresses": [
-                        "1.1.1.1/32",
-                        "2.2.2.2/32"
-                    ],
-                    "provisioningState": "Succeeded"
-                }
-            }
-        ],
-        "ruleCollectionGroup": {
-            "name": "CeleriumRuleCollectionGroup",
-            "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/your-rg/providers/Microsoft.Network/firewallPolicies/your-policy/ruleCollectionGroups/CeleriumRuleCollectionGroup",
-            "type": "Microsoft.Network/firewallPolicies/ruleCollectionGroups",
-            "priority": 100,
-            "ruleCollections": [
-                {
-                    "name": "Blocked-IP-Collection",
-                    "priority": 100,
-                    "ruleCollectionType": "FirewallPolicyFilterRuleCollection",
-                    "action": {
-                        "type": "Deny"
-                    },
-                    "rules": [
-                        {
-                            "name": "blocked-IPs-outbound",
-                            "ruleType": "NetworkRule",
-                            "ipProtocols": ["Any"],
-                            "sourceAddresses": ["*"],
-                            "destinationIpGroups": [
-                                "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/your-rg/providers/Microsoft.Network/ipGroups/fw-blocklist-001"
-                            ],
-                            "destinationPorts": ["*"]
-                        },
-                        {
-                            "name": "blocked-IPs-inbound",
-                            "ruleType": "NetworkRule",
-                            "ipProtocols": ["Any"],
-                            "sourceIpGroups": [
-                                "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/your-rg/providers/Microsoft.Network/ipGroups/fw-blocklist-001"
-                            ],
-                            "destinationAddresses": ["*"],
-                            "destinationPorts": ["*"]
-                        }
-                    ]
-                }
-            ]
-        },
-        "resourceGroup": "your-rg",
-        "policyName": "your-policy"
-    }
-}
-```
-
-### Update Blocklist (`action=update`)
-Updates firewall rules with latest IPs from configured blocklist URL.
-
-```http
-GET /api/blocklist?action=update&code={function_key}
-```
-
-#### Process Flow
-1. Fetches IP list from configured blocklist URL
-2. Validates each IP address
-3. Splits IPs into groups (respecting MAX_IPS_PER_GROUP limit)
-4. Optimizes IP Group management:
-   - Reuses existing groups where possible
-   - Creates new groups only when needed
-   - Removes only unused groups
-5. Updates Firewall Policy rules to use active IP Groups
-6. Creates both inbound and outbound blocking rules
-
-#### IP Processing
-- Strips CIDR notation if present
-- Validates IP format
-- Adds /32 CIDR notation if missing
-- Respects configured limits:
-  - MAX_TOTAL_IPS
-  - MAX_IPS_PER_GROUP
-  - MAX_IP_GROUPS
-
-#### IP Group Management
-1. **Optimized Group Handling**
-   - Existing groups are reused when possible
-   - Groups are updated in place to minimize API calls
-   - Only unused groups are deleted
-   - Atomic updates ensure consistency
-
-2. **Group Naming**
-   - Base name: `fw-blocklist` (configurable)
-   - Numbered sequentially: `fw-blocklist-001`, `fw-blocklist-002`, etc.
-   - Maximum groups determined by MAX_IP_GROUPS setting
-
-3. **Update Process**
-   ```
-   Example with 12,000 IPs and existing groups:
-   - Existing: fw-blocklist-001 (5000 IPs)
-   - Existing: fw-blocklist-002 (5000 IPs)
-   - Existing: fw-blocklist-003 (3000 IPs)
-   
-   New distribution needed:
-   - Update fw-blocklist-001 with new 5000 IPs
-   - Update fw-blocklist-002 with new 5000 IPs
-   - Update fw-blocklist-003 with new 2000 IPs
-   ```
-
-#### Example Response
-```json
-{
-    "status": "success",
-    "message": "Successfully updated IP groups",
-    "timestamp": "2024-03-05T18:28:15Z",
-    "details": {
-        "groupsCreated": [
-            {
-                "id": "/subscriptions/.../ipGroups/fw-blocklist-003",
-                "name": "fw-blocklist-003",
-                "count": 2000,
-                "isNew": true
-            }
-        ],
-        "groupsUpdated": [
-            {
-                "id": "/subscriptions/.../ipGroups/fw-blocklist-001",
-                "name": "fw-blocklist-001",
-                "count": 5000,
-                "isNew": false
-            },
-            {
-                "id": "/subscriptions/.../ipGroups/fw-blocklist-002",
-                "name": "fw-blocklist-002",
-                "count": 5000,
-                "isNew": false
-            }
-        ],
-        "groupsDeleted": [
-            {
-                "name": "fw-blocklist-004"
-            }
-        ],
-        "totalIps": 12000
-    }
-}
-```
-
-### Unblock IPs (`action=unblock`)
-Removes specific IPs from blocklist.
-
-```http
-POST /api/blocklist?action=unblock&code={function_key}
-Content-Type: application/json
-{
-    "ips": [
-        "1.1.1.1",
-        "2.2.2.2"
+    "bindings": [
+        {
+            "name": "Timer",
+            "type": "timerTrigger",
+            "direction": "in",
+            "schedule": "0 */15 * * * *"
+        }
     ]
 }
 ```
 
-#### Process Flow
-1. Receives list of IPs to unblock
-2. Validates each IP address
-3. Retrieves all existing IP Groups
-4. For each IP Group:
-   - Checks if it contains any IPs to unblock
-   - Removes matching IPs
-   - Updates the IP Group if changes were made
-5. Updates Firewall Policy rules if needed
+The default schedule is every 15 minutes (`0 */15 * * * *`). This can be modified by updating the function.json file.
 
-#### IP Handling
-- Matches IPs with or without CIDR notation
-- Maintains original CIDR format for remaining IPs
-- Deletes groups that become empty
-- Updates all affected groups atomically
+## Operation Details
 
-#### Example Response
+### Automatic Blocklist Update
+
+The function performs the following operations automatically when triggered:
+
+1. Authenticates with Azure using service principal credentials
+2. Fetches IP addresses from the configured blocklist URL
+3. Validates and processes the IP addresses
+4. Updates Azure Firewall IP Groups efficiently
+5. Updates the firewall rule collection to reference the IP Groups
+
+#### Security Features
+- No security gaps during updates
+- Continuous protection while groups are updated
+- Single atomic rule collection update
+- Background completion for long-running operations
+
+#### Execution Results
+The function logs detailed information about its execution. Here's an example of successful execution results:
+
 ```json
 {
-    "status": "success",
-    "message": "Successfully unblocked IPs",
-    "timestamp": "2024-03-05T18:28:15Z",
-    "details": {
-        "updatedGroups": [
-            {
-                "id": "/subscriptions/.../ipGroups/fw-blocklist-001",
-                "name": "fw-blocklist-001",
-                "removedCount": 5,
-                "remainingCount": 4495
-            }
-        ],
-        "deletedGroups": [
-            {
-                "name": "fw-blocklist-002",
-                "removedCount": 3200
-            }
-        ],
-        "unblocked": [
-            "192.168.1.1",
-            "10.0.0.1"
-        ]
-    }
+  "status": "success",
+  "message": "Successfully updated IP groups",
+  "timestamp": "2024-03-28T18:52:47Z",
+  "details": {
+    "summary": {
+      "groupsCreated": 0,
+      "groupsUpdated": 4,
+      "groupsDeleted": 1,
+      "groupsProcessed": 4,
+      "totalIps": 28788,
+      "uniqueIps": 28788,
+      "operationStart": "2024-03-28T18:42:16Z",
+      "operationEnd": "2024-03-28T18:52:47Z",
+      "durationSeconds": 631,
+      "completed": true
+    },
+    "groupsUpdated": [
+      {
+        "name": "fw-blocklist-001",
+        "count": 9000
+      },
+      {
+        "name": "fw-blocklist-002",
+        "count": 9000
+      },
+      {
+        "name": "fw-blocklist-003",
+        "count": 9000
+      },
+      {
+        "name": "fw-blocklist-004",
+        "count": 1788
+      }
+    ],
+    "groupsDeleted": [
+      {
+        "name": "fw-blocklist-005"
+      }
+    ]
+  }
 }
 ```
+
+## Manual Execution
+
+While the function runs automatically on schedule, you can also trigger it manually:
+
+1. Navigate to the Azure Portal
+2. Go to Function App > Functions > blocklist
+3. Click "Run"
+4. View logs in the "Monitor" section
 
 ## Error Handling
 
-### Common Error Types
+### Error Log Format
 
-#### Authentication Errors
-- Invalid credentials
-- Expired tokens
-- Insufficient permissions
+When errors occur, they are logged in this format:
 
-#### Resource Errors
-- Resource not found
-- Rate limiting
-- API version mismatches
-
-#### Data Validation Errors
-- Invalid IP addresses
-- Missing required parameters
-- Exceeded size limits
-
-### Error Response Format
-```json
-{
-    "status": "error",
-    "message": "Detailed error description",
-    "timestamp": "2024-03-05T18:28:15Z"
-}
+```
+yyyy-MM-dd HH:mm:ss [Error] Detailed error description
 ```
 
-### Status Codes
-- 400: Bad Request (invalid parameters)
-- 401: Unauthorized (invalid function key)
-- 500: Internal Server Error
+### Common Error Types
 
-## Retry Logic
+| Type | Description | Example |
+|------|-------------|---------|
+| Authentication | Invalid credentials or permissions | "Failed to authenticate with Azure: Invalid client secret" |
+| Resource | Resource not found or unavailable | "IP Group not found: fw-blocklist-001" |
+| Rate Limiting | API throttling | "Rate limited by Azure API, retry after 30 seconds" |
+| Validation | Invalid input data | "Invalid IP address format: 300.1.1.1" |
+| Timeout | Operation exceeded time limit | "Timed out waiting for resource to reach state 'Succeeded'" |
 
-All Azure API calls include built-in retry logic:
-- Maximum 5 retries for IP Group operations
-- Maximum 3 retries for Rule Collection updates
-- Exponential backoff between retries
-- Detailed logging of retry attempts 
+## Timeouts and Retries
+
+### Timeout Handling
+
+Azure Firewall operations often take 5+ minutes to complete. The function:
+- Uses extended timeouts (up to 6 minutes)
+- Continues operations in the background even after timeout
+- Reports success if operations are in progress but not completed
+
+### Retry Strategy
+
+| Operation | Max Retries | Backoff |
+|-----------|------------|---------|
+| IP Group Updates | 2 | Linear (3s, 6s) |
+| Rule Collection Updates | 3 | Exponential (10s, 15s, 22s) |
+| Resource State Checks | Continuous | Exponential with cap |
+
+For long-running operations, success is reported even if the function execution time is exceeded, as Azure continues the operation.
+
+## Function Configuration
+
+For detailed configuration options, please refer to the [README.md](README.md) document. 

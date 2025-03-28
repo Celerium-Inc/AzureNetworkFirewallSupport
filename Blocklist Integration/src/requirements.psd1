@@ -1,3 +1,3 @@
 @{
-    # No modules required - using REST APIs
+    # No modules required
 }

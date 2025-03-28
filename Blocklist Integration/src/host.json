@@ -26,5 +26,17 @@
             "https://functions.azure.com"
         ],
         "supportCredentials": false
-    }
+    },
+    "concurrency": {
+        "dynamicConcurrencyEnabled": true,
+        "snapshotPersistenceEnabled": true
+    },
+    "extensions": {
+        "timer": {
+            "schedule": {
+                "maxConcurrentRuns": 1
+            }
+        }
+    },
+    "functionTimeout": "00:10:00"
 }

@@ -186,6 +186,10 @@ try {
     $srcPath = Join-Path $scriptPath "src"
     Write-Host "Source path: $srcPath"
     
+    if (-not (Test-Path $srcPath)) {
+        throw "Could not find source files in: $srcPath"
+    }
+    
     # Get publishing credentials
     $publishingCredentials = Get-AzWebAppPublishingCredentials -ResourceGroupName $ResourceGroupName -Name $FunctionAppName
     $username = $publishingCredentials.Properties.PublishingUserName
@@ -195,38 +199,75 @@ try {
     # Create function directory structure
     $kuduApiUrl = "https://$FunctionAppName.scm.azurewebsites.net/api/vfs/site/wwwroot"
     
+    # Function to upload file with retry
+    function Invoke-FileUploadWithRetry {
+        param(
+            [string]$Uri,
+            [string]$Content,
+            [string]$ContentType,
+            [int]$MaxRetries = 3
+        )
+        
+        $retryCount = 0
+        while ($retryCount -lt $MaxRetries) {
+            try {
+                # Try to upload the file directly first
+                $response = Invoke-RestMethod -Uri $Uri `
+                    -Headers @{
+                        Authorization = "Basic $base64Auth"
+                        "Content-Type" = $ContentType
+                    } `
+                    -Method PUT `
+                    -Body $Content
+
+                return $response
+            }
+            catch {
+                if ($_.Exception.Response.StatusCode -eq 412 -and $retryCount -lt ($MaxRetries - 1)) {
+                    $retryCount++
+                    Write-Host "ETag conflict, retrying ($retryCount of $MaxRetries)..."
+                    Start-Sleep -Seconds 2
+                    continue
+                }
+                throw
+            }
+        }
+    }
+
     # Create function directory
     Write-Host "Creating function directory..."
-    $null = Invoke-RestMethod -Uri "$kuduApiUrl/blocklist/" `
-        -Headers @{Authorization="Basic $base64Auth"} `
-        -Method PUT
+    try {
+        $null = Invoke-RestMethod -Uri "$kuduApiUrl/blocklist/" `
+            -Headers @{Authorization="Basic $base64Auth"} `
+            -Method PUT
+    }
+    catch {
+        if ($_.Exception.Response.StatusCode -ne 409) {  # Ignore "already exists" error
+            throw
+        }
+    }
 
     # Upload function files
     Write-Host "Uploading function files..."
     
-    # Upload function.json
+    # Upload files with retry logic
+    Write-Host "Uploading function.json..."
     $functionJson = Get-Content -Path (Join-Path $srcPath "function.json") -Raw
-    Invoke-RestMethod -Uri "$kuduApiUrl/blocklist/function.json" `
-        -Headers @{
-            Authorization = "Basic $base64Auth"
-            "Content-Type" = "application/json"
-        } -Method PUT -Body $functionJson
+    $null = Invoke-FileUploadWithRetry -Uri "$kuduApiUrl/blocklist/function.json" `
+        -Content $functionJson `
+        -ContentType "application/json"
 
-    # Upload run.ps1
+    Write-Host "Uploading run.ps1..."
     $runPs1 = Get-Content -Path (Join-Path $srcPath "run.ps1") -Raw
-    Invoke-RestMethod -Uri "$kuduApiUrl/blocklist/run.ps1" `
-        -Headers @{
-            Authorization = "Basic $base64Auth"
-            "Content-Type" = "text/plain"
-        } -Method PUT -Body $runPs1
+    $null = Invoke-FileUploadWithRetry -Uri "$kuduApiUrl/blocklist/run.ps1" `
+        -Content $runPs1 `
+        -ContentType "text/plain"
 
-    # Upload host.json to root
+    Write-Host "Uploading host.json..."
     $hostJson = Get-Content -Path (Join-Path $srcPath "host.json") -Raw
-    Invoke-RestMethod -Uri "$kuduApiUrl/host.json" `
-        -Headers @{
-            Authorization = "Basic $base64Auth"
-            "Content-Type" = "application/json"
-        } -Method PUT -Body $hostJson
+    $null = Invoke-FileUploadWithRetry -Uri "$kuduApiUrl/host.json" `
+        -Content $hostJson `
+        -ContentType "application/json"
 
     Write-Host "Function code deployed successfully"
 
@@ -235,28 +276,16 @@ try {
     Restart-AzFunctionApp -Name $FunctionAppName -ResourceGroupName $ResourceGroupName
 }
 catch {
-    Write-Host "Failed to deploy function code: $_" -ForegroundColor Red
+    Write-Host "Error deploying function code: $_" -ForegroundColor Red
     throw
 }
 
 Write-Host "`nDeployment completed!"
 Write-Host "`nFunction App Details:"
 Write-Host "Name: $FunctionAppName"
-Write-Host "URL: https://$FunctionAppName.azurewebsites.net"
 Write-Host "Application Insights: $appInsightsName"
 
-Write-Host "`nTo test the function:"
-Write-Host "1. Get your function key from the Azure Portal > Function App > App Keys"
-Write-Host "2. Test connectivity:"
-Write-Host "   curl -X GET 'https://$FunctionAppName.azurewebsites.net/api/blocklist?code=<function_key>&action=test'"
-Write-Host "3. Update blocklist:"
-Write-Host "   curl -X GET 'https://$FunctionAppName.azurewebsites.net/api/blocklist?code=<function_key>&action=update'"
-Write-Host "4. Unblock IPs:"
-Write-Host "   curl -X POST 'https://$FunctionAppName.azurewebsites.net/api/blocklist?action=unblock&code=<function_key>' \\"
-Write-Host "        -H 'Content-Type: application/json' \\"
-Write-Host "        -d '{\"ips\":[\"1.1.1.1\",\"2.2.2.2\"]}'"
-
 Write-Host "`nNext steps:"
-Write-Host "1. Get your function key from the Azure Portal"
-Write-Host "2. Test the deployment"
-Write-Host "3. You can now edit the function code directly in the Azure Portal" 
+Write-Host "1. Monitor the function execution in Application Insights"
+Write-Host "2. Check the function logs in Azure Portal > Function App > Functions > blocklist > Monitor"
+Write-Host "3. The function will automatically update the blocklist every 15 minutes" 
