@@ -58,7 +58,7 @@ The function runs on a schedule defined in the `function.json` file. By default,
 
 ```json
 {
-    "schedule": "0 */15 * * * *"
+    "schedule": "0 */10 * * * *"
 }
 ```
 

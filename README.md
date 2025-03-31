@@ -4,16 +4,25 @@ A collection of Azure security and monitoring tools designed to enhance your Azu
 
 ## Projects
 
-### 1. Azure Firewall IP Blocklist Manager
-PowerShell-based Azure Function for managing IP blocklists in Azure Firewall. This solution provides automated updates and management of blocked IP addresses through a RESTful API.
+### 1. Azure Firewall Blocklist Integration
+PowerShell-based Azure Function that automatically updates Azure Firewall IP Groups with blocklists from external sources. This solution provides continuous protection with no security gaps during updates.
 
 **Key Features:**
-- Automated IP blocklist management
-- Real-time Azure Firewall policy updates
-- Support for large IP lists with automatic splitting
-- Comprehensive monitoring and logging
+- Continuous protection with no security gaps during updates
+- Intelligent IP distribution across multiple groups
+- Optimized performance with batched operations
+- Enhanced reliability with comprehensive error handling
+- Extended timeout handling for Azure Firewall operations
+- Automated updates with configurable schedules
+- RESTful API endpoints for testing and manual operations
+
+**Technical Highlights:**
+- Efficiently handles large IP sets (up to 50,000+ IPs)
+- Smart IP group management (up to 5,000 IPs per group)
+- Configurable update frequency (default: every 10 minutes)
+- Comprehensive logging and monitoring
 - Secure service principal authentication
-- Custom role-based access control
+- Graceful handling of Azure API timeouts
 
 [View Documentation](Blocklist%20Integration/README.md)
 
@@ -36,10 +45,9 @@ Azure Function that forwards Event Hub messages to a Syslog server over SSL/UDP.
 
 ```
 ├── Blocklist Integration/         # IP Blocklist Manager
-│   ├── src/                      # Function source code
-│   ├── deploy.ps1               # Deployment script
-│   ├── cleanup.ps1              # Resource cleanup script
-│   └── README.md                # Implementation details
+│   ├── src/                     # Source code directory
+│   ├── README.md                # Implementation details
+│   └── API-Reference.md         # Technical API documentation
 ├── Event Hub Syslog Forwarder/   # Syslog Forwarder
 │   ├── src/                     # Source code directory
 │   └── README.md                # Implementation details

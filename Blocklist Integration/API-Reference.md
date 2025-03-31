@@ -11,13 +11,13 @@ This function is timer-triggered and runs automatically on a schedule defined in
             "name": "Timer",
             "type": "timerTrigger",
             "direction": "in",
-            "schedule": "0 */15 * * * *"
+            "schedule": "0 */10 * * * *"
         }
     ]
 }
 ```
 
-The default schedule is every 15 minutes (`0 */15 * * * *`). This can be modified by updating the function.json file.
+The default schedule is every 10 minutes (`0 */10 * * * *`). This can be modified by updating the function.json file.
 
 ## Operation Details
 
