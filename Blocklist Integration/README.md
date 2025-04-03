@@ -166,7 +166,7 @@ Typical performance characteristics:
 
 To remove all deployed resources:
 ```powershell
-./cleanup.ps1 `
+./block/cleanup.ps1 `
     -ResourceGroupName "your-rg" `
     -FunctionAppName "your-func-name"
 ```
