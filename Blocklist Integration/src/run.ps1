@@ -23,12 +23,16 @@ $baseIpGroupName = if ($env:BASE_IP_GROUP_NAME) { $env:BASE_IP_GROUP_NAME } else
 $ruleCollectionGroupName = if ($env:RULE_COLLECTION_GROUP_NAME) { $env:RULE_COLLECTION_GROUP_NAME } else { "CeleriumRuleCollectionGroup" }
 $ruleCollectionName = if ($env:RULE_COLLECTION_NAME) { $env:RULE_COLLECTION_NAME } else { "Blocked-IP-Collection" }
 $rulePriority = if ($env:RULE_PRIORITY) { [int]$env:RULE_PRIORITY } else { 100 }
+$enforceHttpsOnly = if ($env:ENFORCE_HTTPS_ONLY) { [System.Convert]::ToBoolean($env:ENFORCE_HTTPS_ONLY) } else { $true }
 
 # Set logging verbosity (1=Basic, 2=Verbose)
 $global:LogVerbosity = if ($env:LOG_VERBOSITY) { [int]$env:LOG_VERBOSITY } else { 2 }  # Default to verbose logging
 
 # Error handling preference
 $ErrorActionPreference = 'Stop'
+
+# Configure TLS 1.2
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 # Cache IP regex pattern for performance
 $script:ipRegex = [regex]'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$'
@@ -92,10 +96,28 @@ function Test-IpAddress {
     }
 }
 
+# Validate URL is HTTPS when enforceHttpsOnly is enabled
+function Test-SecureUrl {
+    param([string]$Url)
+    
+    if ($enforceHttpsOnly -and -not $Url.StartsWith("https://")) {
+        Write-FunctionLog "URL must use HTTPS when ENFORCE_HTTPS_ONLY is enabled: $Url" -Level "Error"
+        return $false
+    }
+    
+    return $true
+}
+
 # Fetches and validates IP addresses from the blocklist URL
 function Get-BlocklistIps {
     param([string]$Url)
+    
     try {
+        # Validate URL is HTTPS
+        if (-not (Test-SecureUrl -Url $Url)) {
+            throw "Insecure URL detected. When ENFORCE_HTTPS_ONLY is enabled, only HTTPS URLs are allowed."
+        }
+        
         # Stream response instead of loading all at once
         $request = [System.Net.WebRequest]::Create($Url)
         $response = $request.GetResponse()
@@ -402,23 +424,23 @@ function Update-IpGroup {
                 $existingGroup = Invoke-RestMethod -Method Get -Uri "$url`?api-version=$ipGroupApiVersion" `
                     -Headers @{ "Authorization" = "Bearer $Token" } `
                     -ErrorAction Stop
-                $Location = $existingGroup.location
-                Write-FunctionLog "Using existing IP Group location: $Location" -Level "Verbose"
-            }
-            catch {
+            $Location = $existingGroup.location
+            Write-FunctionLog "Using existing IP Group location: $Location" -Level "Verbose"
+        }
+        catch {
                 # If IP Group doesn't exist, get location from resource group
-                if ($_.Exception.Response.StatusCode.value__ -eq 404) {
-                    Write-FunctionLog "IP Group not found, getting location from resource group..." -Level "Verbose"
+            if ($_.Exception.Response.StatusCode.value__ -eq 404) {
+                Write-FunctionLog "IP Group not found, getting location from resource group..." -Level "Verbose"
                     $rgUrl = "$baseUrl/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup"
                     $rg = Invoke-RestMethod -Method Get -Uri "$rgUrl`?api-version=2024-07-01" `
                         -Headers @{ "Authorization" = "Bearer $Token" } `
                         -ErrorAction Stop
                     $Location = $rg.location
                     Write-FunctionLog "Using resource group location: $Location" -Level "Verbose"
-                }
-                else {
-                    Write-FunctionLog "Failed to get IP Group: $_" -Level "Error"
-                    throw
+            }
+            else {
+                Write-FunctionLog "Failed to get IP Group: $_" -Level "Error"
+                throw
                 }
             }
         }
@@ -516,23 +538,23 @@ function Update-RuleCollectionGroup {
     # Only add rules if we have IP groups
     if ($IpGroupIds.Count -gt 0) {
         $body.properties.ruleCollections[0].rules = @(
-            @{
-                ruleType = "NetworkRule"
-                name = "blocked-IPs-outbound"
-                ipProtocols = @("Any")
-                sourceAddresses = @("*")
+                        @{
+                            ruleType = "NetworkRule"
+                            name = "blocked-IPs-outbound"
+                            ipProtocols = @("Any")
+                            sourceAddresses = @("*")
                 destinationIpGroups = $IpGroupIds
-                destinationPorts = @("*")
-            },
-            @{
-                ruleType = "NetworkRule"
-                name = "blocked-IPs-inbound"
-                ipProtocols = @("Any")
+                            destinationPorts = @("*")
+                        },
+                        @{
+                            ruleType = "NetworkRule"
+                            name = "blocked-IPs-inbound"
+                            ipProtocols = @("Any")
                 sourceIpGroups = $IpGroupIds
-                destinationAddresses = @("*")
-                destinationPorts = @("*")
-            }
-        )
+                            destinationAddresses = @("*")
+                            destinationPorts = @("*")
+                        }
+                    )
     }
 
     Write-FunctionLog "Making request to: $url" -Level "Verbose"
@@ -675,8 +697,8 @@ function Invoke-UpdateAction {
                 Write-FunctionLog "Rule collection group is in '$currentState' state, waiting for completion..." -Level "Warning"
                 $status = Wait-ForResourceState -ResourceId $response.id -Token $Token -DesiredState "Succeeded" -MaxWaitTimeSeconds 360
             }
-        }
-        catch {
+    }
+    catch {
             if ($_.Exception.Response -and $_.Exception.Response.StatusCode.value__ -eq 404) {
                 Write-FunctionLog "Rule collection group does not exist yet." -Level "Warning"
             }
@@ -761,24 +783,24 @@ function Invoke-UpdateAction {
                                 Start-Sleep -Seconds ($retryDelay * $attemptNo)
                             }
                             
-                            $ipGroup = Update-IpGroup -Token $Token `
-                                -SubscriptionId $subscriptionId `
-                                -ResourceGroup $resourceGroup `
-                                -IpAddresses $groupIps `
-                                -IpGroupName $groupName
-                            
+            $ipGroup = Update-IpGroup -Token $Token `
+                -SubscriptionId $subscriptionId `
+                -ResourceGroup $resourceGroup `
+                -IpAddresses $groupIps `
+                -IpGroupName $groupName
+
                             $newGroupResults += @{
-                                id = $ipGroup.id
-                                name = $groupName
-                                count = $groupIps.Count
+                id = $ipGroup.id
+                name = $groupName
+                count = $groupIps.Count
                                 isNew = ($null -eq $existingGroup)
-                            }
+            }
                             
                             $success = $true
                             $processedGroups++
                             break
-                        }
-                        catch {
+        }
+        catch {
                             Write-FunctionLog "Error updating IP Group $groupName (attempt $attemptNo): $_" -Level "Warning"
                             
                             if ($attemptNo -eq $maxRetries) {
@@ -831,8 +853,8 @@ function Invoke-UpdateAction {
                         
                         try {
                             Remove-IpGroup -Token $Token `
-                                -SubscriptionId $subscriptionId `
-                                -ResourceGroup $resourceGroup `
+        -SubscriptionId $subscriptionId `
+        -ResourceGroup $resourceGroup `
                                 -IpGroupName $group.name
                                 
                             $deletedGroups++
@@ -935,8 +957,8 @@ function Invoke-UpdateAction {
                     $success = $true
                 }
                 break
-            }
-            catch {
+    }
+    catch {
                 $errorMessage = $_.ToString()
                 
                 # Check if we need to abort due to time constraints
@@ -981,7 +1003,7 @@ function Invoke-UpdateAction {
                     Write-FunctionLog "Error updating rule collection (attempt $attemptNo): $errorMessage" -Level "Error"
                     
                     if ($attemptNo -eq $maxRetries) {
-                        throw
+                throw
                     }
                 }
             }
@@ -1073,14 +1095,14 @@ try {
     }
 
     # Get Azure access token
-    Write-FunctionLog "Getting Azure access token..."
-    $tokenUrl = "https://login.microsoftonline.com/$($env:TENANT_ID)/oauth2/v2.0/token"
-    $tokenBody = @{
-        grant_type = "client_credentials"
-        client_id = $env:CLIENT_ID
-        client_secret = $env:CLIENT_SECRET
-        scope = "https://management.azure.com/.default"
-    }
+        Write-FunctionLog "Getting Azure access token..."
+        $tokenUrl = "https://login.microsoftonline.com/$($env:TENANT_ID)/oauth2/v2.0/token"
+        $tokenBody = @{
+            grant_type = "client_credentials"
+            client_id = $env:CLIENT_ID
+            client_secret = $env:CLIENT_SECRET
+            scope = "https://management.azure.com/.default"
+        }
 
     # Wrapped in try-catch for better error reporting
     try {
@@ -1093,17 +1115,17 @@ try {
     catch {
         Write-FunctionLog "Error authenticating with Azure: $_" -Level "Error"
         throw "Authentication failed: $_"
-    }
+        }
 
-    $headers = @{
-        "Authorization" = "Bearer $($tokenResponse.access_token)"
-        "Content-Type" = "application/json"
-    }
-    Write-FunctionLog "Successfully obtained access token"
+        $headers = @{
+            "Authorization" = "Bearer $($tokenResponse.access_token)"
+            "Content-Type" = "application/json"
+        }
+        Write-FunctionLog "Successfully obtained access token"
 
     # Run update action by default for timer trigger
     Write-FunctionLog "Starting blocklist update..."
-    Invoke-UpdateAction -Token $tokenResponse.access_token
+                Invoke-UpdateAction -Token $tokenResponse.access_token
     
     Write-FunctionLog "Function completed successfully"
 }

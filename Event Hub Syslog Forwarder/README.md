@@ -15,7 +15,7 @@ Azure Function that forwards syslog messages to Azure Event Hub. Supports both U
 ## Prerequisites
 - Azure subscription
 - Existing Event Hub namespace and Event Hub
-- PowerShell 7.2 or later
+- PowerShell 7.4
 - Azure PowerShell modules:
   - Az.Accounts
   - Az.Resources
@@ -36,7 +36,7 @@ Azure Function that forwards syslog messages to Azure Event Hub. Supports both U
 
 ### Optional Environment Variables
 - `FUNCTIONS_WORKER_RUNTIME`: PowerShell (default)
-- `FUNCTIONS_WORKER_RUNTIME_VERSION`: 7.2 (default)
+- `FUNCTIONS_WORKER_RUNTIME_VERSION`: 7.4 (default)
 - `FUNCTIONS_EXTENSION_VERSION`: ~4 (default)
 - `APPLICATIONINSIGHTS_CONNECTION_STRING`: Auto-configured
 - `APPINSIGHTS_INSTRUMENTATIONKEY`: Auto-configured

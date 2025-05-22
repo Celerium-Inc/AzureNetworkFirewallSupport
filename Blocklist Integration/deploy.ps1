@@ -100,7 +100,9 @@ if (-not $storageAccount) {
     $storageAccount = New-AzStorageAccount -ResourceGroupName $ResourceGroupName `
         -Name $StorageAccountName `
         -Location $Location `
-        -SkuName Standard_LRS
+        -SkuName Standard_LRS `
+        -MinimumTlsVersion TLS1_2 `
+        -EnableHttpsTrafficOnly $true
 }
 
 # Create Application Insights
@@ -135,19 +137,29 @@ if ($existingApp) {
         -StorageAccountName $StorageAccountName `
         -Location $Location `
         -Runtime "PowerShell" `
-        -RuntimeVersion "7.2" `
+        -RuntimeVersion "7.4" `
         -FunctionsVersion "4" `
         -OSType "Windows" `
         -ApplicationInsightsKey $appInsights.InstrumentationKey
 }
 
+# Configure TLS and HTTPS settings using resource manager API
+Write-Host "Configuring TLS and HTTPS settings..."
+$functionAppResource = Get-AzResource -ResourceGroupName $ResourceGroupName -ResourceName $FunctionAppName -ResourceType "Microsoft.Web/sites"
+$functionAppProperties = @{
+    "httpsOnly" = $true
+    "minTlsVersion" = "1.2"
+}
+Set-AzResource -ResourceId $functionAppResource.ResourceId -Properties $functionAppProperties -Force
+
 # Configure runtime versions
 Write-Host "Configuring runtime versions..."
 $runtimeSettings = @{
     "FUNCTIONS_WORKER_RUNTIME" = "powershell"
-    "FUNCTIONS_WORKER_RUNTIME_VERSION" = "7.2"
+    "FUNCTIONS_WORKER_RUNTIME_VERSION" = "7.4"
     "FUNCTIONS_EXTENSION_VERSION" = "~4"
     "WEBSITE_RUN_FROM_PACKAGE" = "0"  # Enable in-portal editing
+    "WEBSITE_HTTPSONLY" = "1"  # Force HTTPS
 }
 Update-AzFunctionAppSetting -Name $FunctionAppName -ResourceGroupName $ResourceGroupName -AppSetting $runtimeSettings
 
@@ -167,6 +179,7 @@ $settings = @{
     "CLIENT_ID" = $ClientId
     "CLIENT_SECRET" = $ClientSecret
     "BLKLIST_URL" = $BlocklistUrl
+    "ENFORCE_HTTPS_ONLY" = "true"  # Enforce HTTPS for all outbound connections
     "APPLICATIONINSIGHTS_CONNECTION_STRING" = $appInsights.ConnectionString
     "APPINSIGHTS_INSTRUMENTATIONKEY" = $appInsights.InstrumentationKey
 }
@@ -284,6 +297,11 @@ Write-Host "`nDeployment completed!"
 Write-Host "`nFunction App Details:"
 Write-Host "Name: $FunctionAppName"
 Write-Host "Application Insights: $appInsightsName"
+
+Write-Host "`nSecurity Configurations:"
+Write-Host "- HTTPS Only: Enabled"
+Write-Host "- Minimum TLS Version: 1.2"
+Write-Host "- Enforce HTTPS for blocklist URL: Enabled"
 
 Write-Host "`nNext steps:"
 Write-Host "1. Monitor the function execution in Application Insights"
