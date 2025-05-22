@@ -148,7 +148,7 @@ if ($existingApp) {
             -StorageAccountName $StorageAccountName `
             -Location $Location `
             -Runtime "PowerShell" `
-            -RuntimeVersion "7.2" `
+            -RuntimeVersion "7.4" `
             -FunctionsVersion "4" `
             -OSType "Windows" `
             -ApplicationInsightsKey $appInsights.InstrumentationKey `
@@ -160,7 +160,7 @@ if ($existingApp) {
 Write-Host "Configuring runtime versions..."
 $runtimeSettings = @{
     "FUNCTIONS_WORKER_RUNTIME" = "powershell"
-    "FUNCTIONS_WORKER_RUNTIME_VERSION" = "7.2"
+    "FUNCTIONS_WORKER_RUNTIME_VERSION" = "7.4"
     "FUNCTIONS_EXTENSION_VERSION" = "~4"
 }
 Update-AzFunctionAppSetting -Name $FunctionAppName -ResourceGroupName $ResourceGroupName -AppSetting $runtimeSettings

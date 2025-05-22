@@ -10,6 +10,7 @@ This solution:
 - Maintains continuous protection with no security gaps during updates
 - Handles large IP sets efficiently
 - Provides comprehensive logging and error handling
+- Enforces secure communications with TLS 1.2 and HTTPS-only connections
 
 ## Features
 
@@ -20,6 +21,7 @@ This solution:
 - **Extended Timeout Handling**: Gracefully handles Azure Firewall's long provisioning times
 - **Automated Updates**: Configurable timer-triggered execution
 - **API Access**: HTTP endpoints for testing and manual operations
+- **Secure Communications**: TLS 1.2 support with HTTPS-only connections
 
 ## Architecture
 
@@ -39,7 +41,7 @@ The solution uses:
 | `RESOURCE_GROUP` | Resource group containing firewall | - | ✓ |
 | `FIREWALL_NAME` | Azure Firewall name | - | ✓ |
 | `POLICY_NAME` | Firewall Policy name | - | ✓ |
-| `BLKLIST_URL` | URL to fetch blocked IPs | - | ✓ |
+| `BLKLIST_URL` | URL to fetch blocked IPs (HTTPS only) | - | ✓ |
 | `TENANT_ID` | Azure AD tenant ID | - | ✓ |
 | `CLIENT_ID` | Azure AD application ID | - | ✓ |
 | `CLIENT_SECRET` | Azure AD application secret | - | ✓ |
@@ -51,6 +53,15 @@ The solution uses:
 | `RULE_COLLECTION_NAME` | Rule collection name | "Blocked-IP-Collection" | |
 | `RULE_PRIORITY` | Rule priority | 100 | |
 | `LOG_VERBOSITY` | Logging level (1=Basic, 2=Verbose) | 2 | |
+| `ENFORCE_HTTPS_ONLY` | Force HTTPS for blocklist URL | true | |
+
+### Security Settings
+
+The function enforces the following security settings:
+
+- **TLS Version**: Uses TLS 1.2 for all communications
+- **HTTPS Enforcement**: Rejects non-HTTPS blocklist URLs when `ENFORCE_HTTPS_ONLY` is enabled (default)
+- **Function App Settings**: Configures the Function App with HTTPS-only access
 
 ### Timer Schedule
 
