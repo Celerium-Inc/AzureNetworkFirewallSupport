@@ -453,12 +453,20 @@ function Update-IpGroup {
         $body = @{
             location = $Location
             properties = @{
-                ipAddresses = $formattedIps
+                ipAddresses = @($formattedIps)  # Ensure this is always treated as an array
             }
         }
 
         Write-FunctionLog "Request URL: $url" -Level "Verbose"
         Write-FunctionLog "Request body: $($body | ConvertTo-Json -Depth 10)" -Level "Verbose"
+
+        # Convert to JSON and ensure ipAddresses is always an array
+        $jsonBody = $body | ConvertTo-Json -Compress -Depth 10
+        # Fix single-element array serialization issue
+        if ($formattedIps.Count -eq 1) {
+            $singleIp = $formattedIps[0] -replace '"', '\"'
+            $jsonBody = $jsonBody -replace '"ipAddresses":"[^"]*"', '"ipAddresses":["' + $singleIp + '"]'
+        }
 
         # Make API call with retries
         $result = Invoke-RestMethod -Method Put -Uri "$url`?api-version=$ipGroupApiVersion" `
@@ -466,7 +474,7 @@ function Update-IpGroup {
                 "Authorization" = "Bearer $Token"
                 "Content-Type" = "application/json"
             } `
-            -Body ($body | ConvertTo-Json -Compress -Depth 10) `
+            -Body $jsonBody `
             -ContentType "application/json"
 
         Write-FunctionLog "IP Group update successful" -Level "Verbose"
