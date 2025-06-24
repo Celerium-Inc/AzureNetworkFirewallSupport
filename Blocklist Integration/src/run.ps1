@@ -357,7 +357,7 @@ function Split-IpsIntoGroups {
     $totalGroups = [int]$groupsNeeded
     Write-FunctionLog "Creating $totalGroups IP groups" -Level "Verbose"
     
-    $groups = @()
+    $groups = [System.Collections.ArrayList]@()
     for ($i = 0; $i -lt $totalGroups; $i++) {
         $startIndex = $i * $MaxIpsPerGroup
         $length = $MaxIpsPerGroup
@@ -374,11 +374,12 @@ function Split-IpsIntoGroups {
         $groupIps = @($IpList | Select-Object -Skip $startIndex -First $length)
         Write-FunctionLog "Created group $($i + 1) with $($groupIps.Count) IPs" -Level "Verbose"
         
-        # Add the group to our results
-        $groups += ,$groupIps
+        # Add the group as a single element to our results using ArrayList.Add()
+        [void]$groups.Add($groupIps)
     }
 
-    return $groups
+    # Return as array to maintain consistency
+    return $groups.ToArray()
 }
 
 # Simplified Update-IpGroup function
@@ -483,16 +484,34 @@ function Update-IpGroup {
     catch {
         $errorDetails = ""
         try {
-            $errorDetails = $_.ErrorDetails.Message
-            if (-not $errorDetails) {
-                $rawError = $_.Exception.Response.GetResponseStream()
-                $reader = New-Object System.IO.StreamReader($rawError)
-                $errorDetails = $reader.ReadToEnd()
-                $reader.Close()
+            # Try to get detailed error message, with null checks
+            if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+                $errorDetails = $_.ErrorDetails.Message
+            }
+            elseif ($_.Exception -and $_.Exception.Response -and $_.Exception.Response.GetResponseStream) {
+                try {
+                    $rawError = $_.Exception.Response.GetResponseStream()
+                    if ($rawError) {
+                        $reader = New-Object System.IO.StreamReader($rawError)
+                        $errorDetails = $reader.ReadToEnd()
+                        $reader.Close()
+                    }
+                }
+                catch {
+                    # If reading response stream fails, fall back to exception message
+                    $errorDetails = if ($_.Exception -and $_.Exception.Message) { $_.Exception.Message } else { "Unknown error reading response stream" }
+                }
+            }
+            elseif ($_.Exception -and $_.Exception.Message) {
+                $errorDetails = $_.Exception.Message
+            }
+            else {
+                $errorDetails = "Unknown error occurred"
             }
         }
         catch {
-            $errorDetails = $_.Exception.Message
+            # Final fallback if all else fails
+            $errorDetails = if ($_.Exception -and $_.Exception.Message) { $_.Exception.Message } else { "Unknown error in error handling" }
         }
 
         Write-FunctionLog "Update-IpGroup failed with details: $errorDetails" -Level "Error"
@@ -629,8 +648,20 @@ function Invoke-AzureRestMethod {
             return $result
         }
         catch {
-            $statusCode = $_.Exception.Response.StatusCode.value__
-            $errorMessage = $_.ErrorDetails.Message
+            # Safely extract error information with null checks
+            $statusCode = if ($_.Exception -and $_.Exception.Response -and $_.Exception.Response.StatusCode) { 
+                $_.Exception.Response.StatusCode.value__ 
+            } else { 
+                "Unknown" 
+            }
+            
+            $errorMessage = if ($_.ErrorDetails -and $_.ErrorDetails.Message) { 
+                $_.ErrorDetails.Message 
+            } elseif ($_.Exception -and $_.Exception.Message) { 
+                $_.Exception.Message 
+            } else { 
+                "Unknown error" 
+            }
 
             Write-FunctionLog "API request failed (Attempt $attempt): Status $statusCode - $errorMessage" -Level "Warning"
 
