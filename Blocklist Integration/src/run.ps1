@@ -378,8 +378,9 @@ function Split-IpsIntoGroups {
         [void]$groups.Add($groupIps)
     }
 
-    # Return as array to maintain consistency
-    return $groups.ToArray()
+    # Return as array to maintain consistency, wrapped to prevent PowerShell auto-unrolling
+    $result = $groups.ToArray()
+    return ,$result
 }
 
 # Simplified Update-IpGroup function
@@ -465,8 +466,9 @@ function Update-IpGroup {
         $jsonBody = $body | ConvertTo-Json -Compress -Depth 10
         # Fix single-element array serialization issue
         if ($formattedIps.Count -eq 1) {
-            $singleIp = $formattedIps[0] -replace '"', '\"'
-            $jsonBody = $jsonBody -replace '"ipAddresses":"[^"]*"', '"ipAddresses":["' + $singleIp + '"]'
+            $escapedIp = $formattedIps[0] -replace '"', '\"'
+            $replacement = '"ipAddresses":["' + $escapedIp + '"]'
+            $jsonBody = $jsonBody -replace '"ipAddresses":"[^"]*"', $replacement
         }
 
         # Make API call with retries
@@ -702,6 +704,9 @@ function Invoke-UpdateAction {
         
         # Split IPs into groups
         $ipGroups = Split-IpsIntoGroups -IpList $blocklistIps -MaxIpsPerGroup $maxIpsPerGroup -MaxGroups $maxIpGroups
+        Write-FunctionLog "Split function returned $($ipGroups.Count) elements" -Level "Verbose"
+        Write-FunctionLog "First element type: $($ipGroups[0].GetType().Name)" -Level "Verbose"
+        Write-FunctionLog "First element count: $($ipGroups[0].Count)" -Level "Verbose"
         Write-FunctionLog "Need $($ipGroups.Count) groups for current IPs"
     
         # Calculate total time elapsed so far
