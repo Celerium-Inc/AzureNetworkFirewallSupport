@@ -22,7 +22,9 @@ $maxIpGroups = if ($env:MAX_IP_GROUPS) { [int]$env:MAX_IP_GROUPS } else { 10 }
 $baseIpGroupName = if ($env:BASE_IP_GROUP_NAME) { $env:BASE_IP_GROUP_NAME } else { "fw-blocklist" }
 $ruleCollectionGroupName = if ($env:RULE_COLLECTION_GROUP_NAME) { $env:RULE_COLLECTION_GROUP_NAME } else { "CeleriumRuleCollectionGroup" }
 $ruleCollectionName = if ($env:RULE_COLLECTION_NAME) { $env:RULE_COLLECTION_NAME } else { "Blocked-IP-Collection" }
-$rulePriority = if ($env:RULE_PRIORITY) { [int]$env:RULE_PRIORITY } else { 100 }
+$rulePriority = if ($env:RULE_PRIORITY) { [int]$env:RULE_PRIORITY } else { 101 }
+$blackholeRulePriority = if ($env:BLACKHOLE_RULE_PRIORITY) { [int]$env:BLACKHOLE_RULE_PRIORITY } else { 100 }
+$groupRulePriority = if ($env:GROUP_RULE_PRIORITY) { [int]$env:GROUP_RULE_PRIORITY } else { 100 }
 $enforceHttpsOnly = if ($env:ENFORCE_HTTPS_ONLY) { [System.Convert]::ToBoolean($env:ENFORCE_HTTPS_ONLY) } else { $true }
 
 # Set logging verbosity (1=Basic, 2=Verbose)
@@ -548,11 +550,18 @@ function Update-RuleCollectionGroup {
     $baseUrl = "https://management.azure.com"
     $url = "$baseUrl/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.Network/firewallPolicies/$FirewallPolicyName/ruleCollectionGroups/$ruleCollectionGroupName"
 
-    # Modify the body to handle empty IpGroupIds
+    # Create rule collection group with priority 100 containing both Blackhole DNAT and Blocked-IP collections
     $body = @{
         properties = @{
-            priority = $rulePriority
+            priority = $groupRulePriority
             ruleCollections = @(
+                @{
+                    ruleCollectionType = "FirewallPolicyNatRuleCollection"
+                    action = @{ type = "Dnat" }
+                    rules = @()  # Empty DNAT collection for customer use
+                    name = "Blackhole"
+                    priority = $blackholeRulePriority
+                },
                 @{
                     ruleCollectionType = "FirewallPolicyFilterRuleCollection"
                     action = @{ type = "Deny" }
@@ -564,23 +573,15 @@ function Update-RuleCollectionGroup {
         }
     }
 
-    # Only add rules if we have IP groups
+    # Only add outbound rule to the Blocked-IP collection if we have IP groups
     if ($IpGroupIds.Count -gt 0) {
-        $body.properties.ruleCollections[0].rules = @(
+        $body.properties.ruleCollections[1].rules = @(
                         @{
                             ruleType = "NetworkRule"
                             name = "blocked-IPs-outbound"
                             ipProtocols = @("Any")
                             sourceAddresses = @("*")
-                destinationIpGroups = $IpGroupIds
-                            destinationPorts = @("*")
-                        },
-                        @{
-                            ruleType = "NetworkRule"
-                            name = "blocked-IPs-inbound"
-                            ipProtocols = @("Any")
-                sourceIpGroups = $IpGroupIds
-                            destinationAddresses = @("*")
+                            destinationIpGroups = $IpGroupIds
                             destinationPorts = @("*")
                         }
                     )

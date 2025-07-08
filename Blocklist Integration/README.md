@@ -7,6 +7,7 @@ An Azure Function that automatically updates Azure Firewall IP Groups with block
 This solution:
 - Fetches IP addresses from external blocklists
 - Updates Azure Firewall IP Groups with these addresses
+- Creates both outbound blocking rules and an empty DNAT collection for customer use
 - Maintains continuous protection with no security gaps during updates
 - Handles large IP sets efficiently
 - Provides comprehensive logging and error handling
@@ -31,6 +32,18 @@ The solution uses:
 - Azure Firewall IP Groups
 - Azure Firewall Policy Rule Collections
 
+### Rule Collection Structure
+
+The function creates a single rule collection group (`CeleriumRuleCollectionGroup`) with priority 100 containing:
+
+1. **Blackhole DNAT Collection** (Priority 100)
+   - Empty DNAT rule collection for customer use
+   - Customers can add their own DNAT rules here
+   
+2. **Blocked-IP Collection** (Priority 101)
+   - Contains outbound blocking rules only
+   - Automatically populated with IPs from the blocklist
+
 ## Configuration
 
 ### Environment Variables
@@ -50,10 +63,21 @@ The solution uses:
 | `MAX_IP_GROUPS` | Maximum number of groups | 10 | |
 | `BASE_IP_GROUP_NAME` | Base name for IP groups | "fw-blocklist" | |
 | `RULE_COLLECTION_GROUP_NAME` | Rule collection group name | "CeleriumRuleCollectionGroup" | |
-| `RULE_COLLECTION_NAME` | Rule collection name | "Blocked-IP-Collection" | |
-| `RULE_PRIORITY` | Rule priority | 100 | |
+| `RULE_COLLECTION_NAME` | Rule collection name | "Blocked-IP" | |
+| `RULE_PRIORITY` | Blocked-IP collection priority | 101 | |
+| `BLACKHOLE_RULE_PRIORITY` | Blackhole DNAT collection priority | 100 | |
+| `GROUP_RULE_PRIORITY` | Rule collection group priority | 100 | |
 | `LOG_VERBOSITY` | Logging level (1=Basic, 2=Verbose) | 2 | |
 | `ENFORCE_HTTPS_ONLY` | Force HTTPS for blocklist URL | true | |
+
+### Blackhole DNAT Collection
+
+The function creates an empty DNAT rule collection called "Blackhole" for customer use:
+
+- **Purpose**: Provides a dedicated space for custom DNAT rules
+- **Priority**: 100 (executes before the blocking rules)
+- **Management**: Customers can add their own DNAT rules through Azure Portal or ARM templates
+- **Best Practice**: Use this collection for any custom NAT rules to ensure proper rule ordering
 
 ### Security Settings
 
@@ -109,6 +133,13 @@ The function maintains continuous protection during updates:
 2. **Secure Updates**: IP groups are updated while still referenced in the firewall
 3. **Atomic Rule Updates**: Final rule collection changes happen in a single operation
 4. **Graceful Timeout Handling**: Updates complete in the background even if function times out
+5. **Outbound-Only Blocking**: Creates only outbound blocking rules
+
+### Rule Priority Order
+
+Rules are processed in this order:
+1. **Blackhole DNAT Collection** (Priority 100) - Customer's custom DNAT rules
+2. **Blocked-IP Collection** (Priority 101) - Automated outbound blocking rules
 
 ## Deployment
 
@@ -138,6 +169,11 @@ The function maintains continuous protection during updates:
        -BlocklistUrl "https://your-blocklist-url"
    ```
 
+3. After deployment, the function will create:
+   - A rule collection group named "CeleriumRuleCollectionGroup" (priority 100)
+   - An empty "Blackhole" DNAT collection (priority 100) for customer use
+   - A "Blocked-IP" collection (priority 101) with outbound blocking rules
+
 ## Monitoring and Troubleshooting
 
 ### Logging
@@ -166,12 +202,34 @@ Access logs through:
    - The function implements exponential backoff for retries
    - Consider adjusting the update frequency if persistent
 
+5. **Rule Collection Issues**
+   - The function creates both Blackhole (DNAT) and Blocked-IP (Filter) collections
+   - Ensure the Azure Firewall Policy supports both collection types
+   - Check that rule priorities don't conflict with existing rules
+
 ## Performance Metrics
 
 Typical performance characteristics:
 - ~30,000 IPs processed in 5-8 minutes
 - IP Group updates: 1-2 seconds per group
-- Rule Collection updates: 3-5 minutes (Azure limitation)
+- Rule Collection Group updates: 3-5 minutes (Azure limitation)
+- Creates 2 rule collections per update: Blackhole (DNAT) and Blocked-IP (Filter)
+
+## Customer Usage
+
+### Using the Blackhole DNAT Collection
+
+After deployment, customers can add their own DNAT rules to the "Blackhole" collection:
+
+1. **Through Azure Portal**:
+   - Navigate to Azure Firewall Policy > Rule collection groups
+   - Select "CeleriumRuleCollectionGroup"
+   - Edit the "Blackhole" collection
+   - Add custom DNAT rules as needed
+
+2. **Through ARM Templates or PowerShell**:
+   - Target the existing "Blackhole" collection within "CeleriumRuleCollectionGroup"
+   - Add rules with priorities that don't conflict with existing rules
 
 ## Cleanup
 
