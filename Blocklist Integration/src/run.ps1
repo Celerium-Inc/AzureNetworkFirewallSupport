@@ -550,6 +550,31 @@ function Update-RuleCollectionGroup {
     $baseUrl = "https://management.azure.com"
     $url = "$baseUrl/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.Network/firewallPolicies/$FirewallPolicyName/ruleCollectionGroups/$ruleCollectionGroupName"
 
+    # Try to get existing rule collection group to preserve Blackhole rules
+    $existingBlackholeRules = @()
+    try {
+        Write-FunctionLog "Checking for existing Blackhole rules to preserve..." -Level "Verbose"
+        $existingRCG = Invoke-RestMethod -Method Get -Uri "$url`?api-version=2024-07-01" `
+            -Headers @{ "Authorization" = "Bearer $Token" } `
+            -ErrorAction Stop
+        
+        # Find existing Blackhole collection and preserve its rules
+        $blackholeCollection = $existingRCG.properties.ruleCollections | Where-Object { $_.name -eq "Blackhole" }
+        if ($blackholeCollection -and $blackholeCollection.rules) {
+            $existingBlackholeRules = $blackholeCollection.rules
+            Write-FunctionLog "Found $($existingBlackholeRules.Count) existing Blackhole rules to preserve" -Level "Information"
+        } else {
+            Write-FunctionLog "No existing Blackhole rules found" -Level "Verbose"
+        }
+    }
+    catch {
+        if ($_.Exception.Response -and $_.Exception.Response.StatusCode.value__ -eq 404) {
+            Write-FunctionLog "Rule collection group doesn't exist yet - will create new" -Level "Verbose"
+        } else {
+            Write-FunctionLog "Could not check existing rules (will proceed with empty Blackhole): $_" -Level "Warning"
+        }
+    }
+
     # Create rule collection group with priority 100 containing both Blackhole DNAT and Blocked-IP collections
     $body = @{
         properties = @{
@@ -558,7 +583,7 @@ function Update-RuleCollectionGroup {
                 @{
                     ruleCollectionType = "FirewallPolicyNatRuleCollection"
                     action = @{ type = "Dnat" }
-                    rules = @()  # Empty DNAT collection for customer use
+                    rules = $existingBlackholeRules  # Preserve existing customer rules
                     name = "Blackhole"
                     priority = $blackholeRulePriority
                 },
