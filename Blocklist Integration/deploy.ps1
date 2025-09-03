@@ -25,7 +25,17 @@ param(
     [string]$ClientSecret,
 
     [Parameter(Mandatory = $true)]
-    [string]$BlocklistUrl
+    [string]$BlocklistUrl,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateSet("AzurePublicCloud","AzureUSGovernment","AzureChinaCloud","AzureGermanCloud")]
+    [string]$AzureCloud = "AzurePublicCloud",
+
+    [Parameter(Mandatory = $false)]
+    [string]$AuthorityHost,
+
+    [Parameter(Mandatory = $false)]
+    [string]$ArmEndpoint
 )
 
 # Helper function to get publishing credentials
@@ -67,19 +77,32 @@ function Get-ValidStorageAccountName {
 # Error handling
 $ErrorActionPreference = 'Stop'
 
-# Login check and get subscription
+# Login check and get subscription (environment-aware)
+$targetAzEnv = switch ($AzureCloud) {
+    "AzureUSGovernment" { "AzureUSGovernment" }
+    "AzureChinaCloud"   { "AzureChinaCloud" }
+    "AzureGermanCloud"  { "AzureGermanCloud" }
+    default             { "AzureCloud" }
+}
 try {
     $context = Get-AzContext
     if (-not $context) {
-        Write-Host "Please login to Azure..."
-        Connect-AzAccount -UseDeviceAuthentication
+        Write-Host "Please login to $targetAzEnv..."
+        Connect-AzAccount -UseDeviceAuthentication -Environment $targetAzEnv
+        $context = Get-AzContext
+    } elseif ($context.Environment.Name -ne $targetAzEnv) {
+        Write-Host "Current Az environment ($($context.Environment.Name)) differs from target ($targetAzEnv). Logging in to target..."
+        Connect-AzAccount -UseDeviceAuthentication -Environment $targetAzEnv
+        $context = Get-AzContext
     }
     $subscriptionId = $context.Subscription.Id
-    Write-Host "Using subscription: $($context.Subscription.Name) ($subscriptionId)"
+    Write-Host "Using subscription: $($context.Subscription.Name) ($subscriptionId) in $targetAzEnv"
 }
 catch {
-    Write-Host "Please login to Azure..."
-    Connect-AzAccount -UseDeviceAuthentication
+    Write-Host "Please login to $targetAzEnv..."
+    Connect-AzAccount -UseDeviceAuthentication -Environment $targetAzEnv
+    $context = Get-AzContext
+    $subscriptionId = $context.Subscription.Id
 }
 
 # Verify Resource Group exists
@@ -182,7 +205,13 @@ $settings = @{
     "ENFORCE_HTTPS_ONLY" = "true"  # Enforce HTTPS for all outbound connections
     "APPLICATIONINSIGHTS_CONNECTION_STRING" = $appInsights.ConnectionString
     "APPINSIGHTS_INSTRUMENTATIONKEY" = $appInsights.InstrumentationKey
+    "AZURE_CLOUD" = $AzureCloud
+    "AZURE_CLOUD_ENVIRONMENT" = $AzureCloud
 }
+
+# Add sovereign overrides if provided
+if ($AuthorityHost) { $settings["AZURE_AUTHORITY_HOST"] = $AuthorityHost }
+if ($ArmEndpoint) { $settings["AZURE_ARM_ENDPOINT"] = $ArmEndpoint }
 
 Update-AzFunctionAppSetting -Name $FunctionAppName -ResourceGroupName $ResourceGroupName -AppSetting $settings
 
@@ -210,7 +239,21 @@ try {
     $base64Auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$($username):$($password)"))
 
     # Create function directory structure
-    $kuduApiUrl = "https://$FunctionAppName.scm.azurewebsites.net/api/vfs/site/wwwroot"
+    # Derive Kudu host from the app's default hostname to support all clouds (public, gov, china, germany)
+    try {
+        $webApp = Get-AzWebApp -ResourceGroupName $ResourceGroupName -Name $FunctionAppName
+        $defaultHost = $webApp.DefaultHostName
+    }
+    catch {
+        $defaultHost = $null
+    }
+    if ($defaultHost) {
+        $kuduHost = ($defaultHost -replace '(^[^\.]+)\.', '$1.scm.')
+        $kuduApiUrl = "https://$kuduHost/api/vfs/site/wwwroot"
+    } else {
+        # Fallback to public domain if default host is unavailable
+        $kuduApiUrl = "https://$FunctionAppName.scm.azurewebsites.net/api/vfs/site/wwwroot"
+    }
     
     # Function to upload file with retry
     function Invoke-FileUploadWithRetry {
