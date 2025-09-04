@@ -4,7 +4,11 @@ param(
     [string]$ResourceGroupName,
     
     [Parameter(Mandatory = $true)]
-    [string]$FunctionAppName
+    [string]$FunctionAppName,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateSet("AzurePublicCloud","AzureUSGovernment","AzureChinaCloud","AzureGermanCloud")]
+    [string]$AzureCloud = "AzurePublicCloud"
 )
 
 # Error handling
@@ -47,13 +51,25 @@ if ($confirmation -ne 'y') {
     exit 0
 }
 
-# Function to ensure we have a valid Azure context
+# Function to ensure we have a valid Azure context (environment-aware)
 function Ensure-AzureConnection {
     try {
+        $targetAzEnv = switch ($AzureCloud) {
+            "AzureUSGovernment" { "AzureUSGovernment" }
+            "AzureChinaCloud"   { "AzureChinaCloud" }
+            "AzureGermanCloud"  { "AzureGermanCloud" }
+            default             { "AzureCloud" }
+        }
+
         $context = Get-AzContext
         if (-not $context) {
-            Write-Host "No Azure context found. Connecting..."
-            Connect-AzAccount -UseDeviceAuthentication
+            Write-Host "No Azure context found. Connecting to $targetAzEnv..."
+            Connect-AzAccount -UseDeviceAuthentication -Environment $targetAzEnv
+            $context = Get-AzContext
+        }
+        elseif ($context.Environment.Name -ne $targetAzEnv) {
+            Write-Host "Current Az environment ($($context.Environment.Name)) differs from target ($targetAzEnv). Connecting..."
+            Connect-AzAccount -UseDeviceAuthentication -Environment $targetAzEnv
             $context = Get-AzContext
         }
         

@@ -42,6 +42,38 @@ $script:ipRegex = [regex]'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$'
 # Global API version for all Azure REST API calls
 $script:apiVersion = "2024-01-01"
 
+# Configure cloud endpoints (supports public and sovereign clouds)
+# Priority: explicit hosts via env -> cloud selection via env -> defaults to public cloud
+$script:authorityHost = if ($env:AZURE_AUTHORITY_HOST) { $env:AZURE_AUTHORITY_HOST } else { $null }
+$script:armEndpoint = if ($env:AZURE_ARM_ENDPOINT) { $env:AZURE_ARM_ENDPOINT } else { $null }
+if (-not $script:authorityHost -or -not $script:armEndpoint) {
+    # Accept either AZURE_CLOUD or AZURE_CLOUD_ENVIRONMENT; support simple names case-insensitively
+    $cloudInput = if ($env:AZURE_CLOUD) { $env:AZURE_CLOUD } elseif ($env:AZURE_CLOUD_ENVIRONMENT) { $env:AZURE_CLOUD_ENVIRONMENT } else { "AzurePublicCloud" }
+    $cloud = $cloudInput.ToLower()
+    switch ($cloud) {
+        "azureusgovernment" {
+            $script:authorityHost = "https://login.microsoftonline.us"
+            $script:armEndpoint = "https://management.usgovcloudapi.net"
+        }
+        "azurechinacloud" {
+            $script:authorityHost = "https://login.chinacloudapi.cn"
+            $script:armEndpoint = "https://management.chinacloudapi.cn"
+        }
+        "azuregermancloud" {
+            $script:authorityHost = "https://login.microsoftonline.de"
+            $script:armEndpoint = "https://management.microsoftazure.de"
+        }
+        "azure" { # shorthand for public cloud
+            $script:authorityHost = "https://login.microsoftonline.com"
+            $script:armEndpoint = "https://management.azure.com"
+        }
+        default { # includes AzurePublicCloud or any unrecognized value
+            $script:authorityHost = "https://login.microsoftonline.com"
+            $script:armEndpoint = "https://management.azure.com"
+        }
+    }
+}
+
 # Logging function with verbosity levels
 function Write-FunctionLog {
     param(
@@ -221,7 +253,7 @@ function Wait-ForResourceState {
             
             # Make API request to check resource state
             Write-FunctionLog "Checking resource state (Attempt $attempt)..." -Level "Verbose"
-            $apiUrl = "https://management.azure.com$ResourceId`?api-version=2024-07-01"
+            $apiUrl = "$script:armEndpoint$ResourceId`?api-version=2024-07-01"
             $status = Invoke-RestMethod -Method Get -Uri $apiUrl -Headers $headers -ErrorAction Stop
             
             # Reset error counter on success
@@ -416,7 +448,7 @@ function Update-IpGroup {
             if ($_ -match '/\d+$') { $_ } else { "$_/32" }
         }
 
-        $baseUrl = "https://management.azure.com"
+        $baseUrl = $script:armEndpoint
         $ipGroupApiVersion = "2024-07-01"  # Updated to a supported API version
         $url = "$baseUrl/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.Network/ipGroups/$IpGroupName"
 
@@ -547,7 +579,7 @@ function Update-RuleCollectionGroup {
         [string[]]$IpGroupIds = @()
     )
 
-    $baseUrl = "https://management.azure.com"
+    $baseUrl = $script:armEndpoint
     $url = "$baseUrl/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.Network/firewallPolicies/$FirewallPolicyName/ruleCollectionGroups/$ruleCollectionGroupName"
 
     # Try to get existing rule collection group to preserve Blackhole rules
@@ -719,7 +751,7 @@ function Invoke-UpdateAction {
         # Get all existing groups
         Write-FunctionLog "Fetching existing IP groups..."
         $existingGroups = Invoke-AzureRestMethod -Method Get `
-            -Uri "https://management.azure.com/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Network/ipGroups" `
+            -Uri "$script:armEndpoint/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Network/ipGroups" `
             -Headers @{ "Authorization" = "Bearer $Token" } `
             -MaxRetries 3 `
             -RetryDelay 5 `
@@ -747,7 +779,7 @@ function Invoke-UpdateAction {
         }
     
         # Check if the rule collection already exists - wrapped in additional try/catch for safety
-        $ruleCollectionUrl = "https://management.azure.com/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Network/firewallPolicies/$policyName/ruleCollectionGroups/$ruleCollectionGroupName"
+        $ruleCollectionUrl = "$script:armEndpoint/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Network/firewallPolicies/$policyName/ruleCollectionGroups/$ruleCollectionGroupName"
         $ruleCollectionExists = $false
         $currentState = $null
         $ruleCollectionId = $null
@@ -1139,7 +1171,7 @@ function Remove-IpGroup {
     try {
         Write-FunctionLog "Deleting IP Group '$IpGroupName'..."
         
-        $baseUrl = "https://management.azure.com"
+        $baseUrl = $script:armEndpoint
         $url = "$baseUrl/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.Network/ipGroups/$IpGroupName"
         
         Invoke-RestMethod -Method Delete -Uri "$url`?api-version=2024-07-01" `
@@ -1166,12 +1198,12 @@ try {
 
     # Get Azure access token
         Write-FunctionLog "Getting Azure access token..."
-        $tokenUrl = "https://login.microsoftonline.com/$($env:TENANT_ID)/oauth2/v2.0/token"
+        $tokenUrl = "$($script:authorityHost)/$($env:TENANT_ID)/oauth2/v2.0/token"
         $tokenBody = @{
             grant_type = "client_credentials"
             client_id = $env:CLIENT_ID
             client_secret = $env:CLIENT_SECRET
-            scope = "https://management.azure.com/.default"
+            scope = "$($script:armEndpoint)/.default"
         }
 
     # Wrapped in try-catch for better error reporting
