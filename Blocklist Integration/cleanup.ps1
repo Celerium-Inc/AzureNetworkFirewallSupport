@@ -7,7 +7,7 @@ param(
     [string]$FunctionAppName,
 
     [Parameter(Mandatory = $false)]
-    [ValidateSet("AzurePublicCloud","AzureUSGovernment","AzureChinaCloud","AzureGermanCloud")]
+    [ValidateSet("AzurePublicCloud","AzureUSGovernment")]
     [string]$AzureCloud = "AzurePublicCloud"
 )
 
@@ -56,8 +56,6 @@ function Ensure-AzureConnection {
     try {
         $targetAzEnv = switch ($AzureCloud) {
             "AzureUSGovernment" { "AzureUSGovernment" }
-            "AzureChinaCloud"   { "AzureChinaCloud" }
-            "AzureGermanCloud"  { "AzureGermanCloud" }
             default             { "AzureCloud" }
         }
 

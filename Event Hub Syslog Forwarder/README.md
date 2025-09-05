@@ -11,6 +11,7 @@ Azure Function that forwards syslog messages to Azure Event Hub. Supports both U
 - Custom role-based access control
 - Optimized deployment process with retries
 - Automatic storage account naming
+- Works in Azure Public and Sovereign clouds (US Gov)
 
 ## Prerequisites
 - Azure subscription
@@ -32,7 +33,7 @@ Azure Function that forwards syslog messages to Azure Event Hub. Supports both U
 - `SYSLOG_PORT`: Syslog server port
 - `EVENT_HUB_NAME`: Event Hub name
 - `EVENTHUB_CONNECTION`: Event Hub connection string
-- `PROTOCOL`: Syslog protocol (SSL or UDP)
+- `SYSLOG_PROTOCOL`: Syslog protocol (SSL or UDP)
 
 ### Optional Environment Variables
 - `FUNCTIONS_WORKER_RUNTIME`: PowerShell (default)
@@ -71,14 +72,28 @@ These commands have been tested via cloud shell
     -Protocol "SSL"  # Optional, defaults to SSL
 ```
 
+For Azure US Government (or other sovereign clouds):
+```powershell
+./forward/deploy.ps1 `
+    -ResourceGroupName "your-rg" `
+    -Location "your-loc" `
+    -FunctionAppName "your-func-name" `
+    -SyslogServer "syslog.example.com" `
+    -SyslogPort 514 `
+    -EventHubName "your-eventhub" `
+    -EventHubConnection "your-connection-string" `
+    -Protocol "SSL" `
+    -AzureCloud AzureUSGovernment
+```
+
 The deployment script will:
-1. Verify Azure connection and resource group
+1. Verify Azure connection and resource group (cloud-aware)
 2. Create or update storage account (auto-named from function app name)
 3. Create or update Application Insights
 4. Create or update Function App
 5. Configure runtime settings and environment variables
 6. Validate required permissions
-7. Deploy function code with retry logic
+7. Deploy function code with retry logic (cloud-aware Kudu URL)
 8. Restart the function app
 
 ### Deployment Validation
@@ -135,11 +150,13 @@ Remove all deployed resources:
     -FunctionAppName "your-func-name"
 ```
 
-The cleanup script will remove:
-1. Function App
-2. Application Insights
-3. Associated storage account
-4. Any related resources
+For sovereign clouds (e.g., US Gov):
+```powershell
+./forward/cleanup.ps1 `
+    -ResourceGroupName "your-rg" `
+    -FunctionAppName "your-func-name" `
+    -AzureCloud AzureUSGovernment
+```
 
 ## Documentation
 

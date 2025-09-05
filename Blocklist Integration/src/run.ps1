@@ -55,14 +55,6 @@ if (-not $script:authorityHost -or -not $script:armEndpoint) {
             $script:authorityHost = "https://login.microsoftonline.us"
             $script:armEndpoint = "https://management.usgovcloudapi.net"
         }
-        "azurechinacloud" {
-            $script:authorityHost = "https://login.chinacloudapi.cn"
-            $script:armEndpoint = "https://management.chinacloudapi.cn"
-        }
-        "azuregermancloud" {
-            $script:authorityHost = "https://login.microsoftonline.de"
-            $script:armEndpoint = "https://management.microsoftazure.de"
-        }
         "azure" { # shorthand for public cloud
             $script:authorityHost = "https://login.microsoftonline.com"
             $script:armEndpoint = "https://management.azure.com"

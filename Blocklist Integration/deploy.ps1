@@ -28,7 +28,7 @@ param(
     [string]$BlocklistUrl,
 
     [Parameter(Mandatory = $false)]
-    [ValidateSet("AzurePublicCloud","AzureUSGovernment","AzureChinaCloud","AzureGermanCloud")]
+    [ValidateSet("AzurePublicCloud","AzureUSGovernment")]
     [string]$AzureCloud = "AzurePublicCloud",
 
     [Parameter(Mandatory = $false)]
@@ -80,8 +80,6 @@ $ErrorActionPreference = 'Stop'
 # Login check and get subscription (environment-aware)
 $targetAzEnv = switch ($AzureCloud) {
     "AzureUSGovernment" { "AzureUSGovernment" }
-    "AzureChinaCloud"   { "AzureChinaCloud" }
-    "AzureGermanCloud"  { "AzureGermanCloud" }
     default             { "AzureCloud" }
 }
 try {
@@ -239,7 +237,7 @@ try {
     $base64Auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$($username):$($password)"))
 
     # Create function directory structure
-    # Derive Kudu host from the app's default hostname to support all clouds (public, gov, china, germany)
+    # Derive Kudu host from the app's default hostname to support all clouds (public, gov)
     try {
         $webApp = Get-AzWebApp -ResourceGroupName $ResourceGroupName -Name $FunctionAppName
         $defaultHost = $webApp.DefaultHostName
