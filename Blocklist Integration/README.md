@@ -69,7 +69,7 @@ The function creates a single rule collection group (`CeleriumRuleCollectionGrou
 | `GROUP_RULE_PRIORITY` | Rule collection group priority | 100 | |
 | `LOG_VERBOSITY` | Logging level (1=Basic, 2=Verbose) | 2 | |
 | `ENFORCE_HTTPS_ONLY` | Force HTTPS for blocklist URL | true | |
-| `AZURE_CLOUD` | Cloud selection: `AzurePublicCloud`, `AzureUSGovernment`, `AzureChinaCloud`, `AzureGermanCloud` | AzurePublicCloud | |
+| `AZURE_CLOUD` | Cloud selection: `AzurePublicCloud`, `AzureUSGovernment` | AzurePublicCloud | |
 | `AZURE_CLOUD_ENVIRONMENT` | Alternative alias (simple names accepted, e.g., `azure`, `azureusgovernment`) | - | |
 | `AZURE_AUTHORITY_HOST` | Override AAD authority host (e.g., `https://login.microsoftonline.us`) | Derived from cloud | |
 | `AZURE_ARM_ENDPOINT` | Override ARM endpoint (e.g., `https://management.usgovcloudapi.net`) | Derived from cloud | |
@@ -86,10 +86,6 @@ To avoid AADSTS900382 cross-cloud errors, ensure the authentication authority an
   - ARM: `https://management.azure.com`
 - **Azure US Government**:
   - Set `AZURE_CLOUD=AzureUSGovernment` (or `AZURE_CLOUD_ENVIRONMENT=azureusgovernment`), or set `AZURE_AUTHORITY_HOST=https://login.microsoftonline.us` and `AZURE_ARM_ENDPOINT=https://management.usgovcloudapi.net`
-- **Azure China**:
-  - Set `AZURE_CLOUD=AzureChinaCloud` (or `AZURE_CLOUD_ENVIRONMENT=azurechinacloud`), or set `AZURE_AUTHORITY_HOST=https://login.chinacloudapi.cn` and `AZURE_ARM_ENDPOINT=https://management.chinacloudapi.cn`
-- **Azure Germany**:
-  - Set `AZURE_CLOUD=AzureGermanCloud` (or `AZURE_CLOUD_ENVIRONMENT=azuregermancloud`), or set `AZURE_AUTHORITY_HOST=https://login.microsoftonline.de` and `AZURE_ARM_ENDPOINT=https://management.microsoftazure.de`
 
 The function will request tokens from the correct authority and target the appropriate ARM endpoint (scope `<ARM>/.default`) automatically based on these settings.
 

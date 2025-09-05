@@ -23,7 +23,11 @@ param(
 
     [Parameter(Mandatory = $false)]
     [ValidateSet("SSL", "UDP")]
-    [string]$Protocol = "SSL"
+    [string]$Protocol = "SSL",
+
+    [Parameter(Mandatory = $false)]
+    [ValidateSet("AzurePublicCloud","AzureUSGovernment")]
+    [string]$AzureCloud = "AzurePublicCloud"
 )
 
 # Error handling
@@ -47,18 +51,27 @@ function Get-ValidStorageAccountName {
     return $name
 }
 
-# Verify Azure connection
+# Verify Azure connection (environment-aware)
 try {
+    $targetAzEnv = switch ($AzureCloud) {
+        "AzureUSGovernment" { "AzureUSGovernment" }
+        default             { "AzureCloud" }
+    }
     $context = Get-AzContext
     if (-not $context) {
-        Write-Host "Please login to Azure..."
-        Connect-AzAccount -UseDeviceAuthentication
+        Write-Host "Please login to $targetAzEnv..."
+        Connect-AzAccount -UseDeviceAuthentication -Environment $targetAzEnv
+        $context = Get-AzContext
+    } elseif ($context.Environment.Name -ne $targetAzEnv) {
+        Write-Host "Current Az environment ($($context.Environment.Name)) differs from target ($targetAzEnv). Logging in to target..."
+        Connect-AzAccount -UseDeviceAuthentication -Environment $targetAzEnv
+        $context = Get-AzContext
     }
-    Write-Host "Using subscription: $($context.Subscription.Name) ($($context.Subscription.Id))"
+    Write-Host "Using subscription: $($context.Subscription.Name) ($($context.Subscription.Id)) in $targetAzEnv"
 }
 catch {
-    Write-Host "Please login to Azure..."
-    Connect-AzAccount -UseDeviceAuthentication
+    Write-Host "Please login to $targetAzEnv..."
+    Connect-AzAccount -UseDeviceAuthentication -Environment $targetAzEnv
 }
 
 # Verify Resource Group exists
@@ -207,7 +220,19 @@ try {
     $username = $publishingCredentials.Properties.PublishingUserName
     $password = $publishingCredentials.Properties.PublishingPassword
     $base64Auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$($username):$($password)"))
-    $apiUrl = "https://$FunctionAppName.scm.azurewebsites.net/api/vfs"
+
+    # Derive Kudu URL from default hostname to support sovereign clouds
+    try {
+        $webApp = Get-AzWebApp -ResourceGroupName $ResourceGroupName -Name $FunctionAppName
+        $defaultHost = $webApp.DefaultHostName
+    }
+    catch { $defaultHost = $null }
+    if ($defaultHost) {
+        $kuduHost = ($defaultHost -replace '(^[^\.]+)\.', '$1.scm.')
+        $apiUrl = "https://$kuduHost/api/vfs"
+    } else {
+        $apiUrl = "https://$FunctionAppName.scm.azurewebsites.net/api/vfs"
+    }
 
     # Create function directory
     Write-Host "Creating function directory..."
@@ -283,7 +308,11 @@ catch {
 Write-Host "`nDeployment completed!"
 Write-Host "`nFunction App Details:"
 Write-Host "Name: $FunctionAppName"
-Write-Host "URL: https://$FunctionAppName.azurewebsites.net"
+if ($defaultHost) {
+    Write-Host "URL: https://$defaultHost"
+} else {
+    Write-Host "URL: https://$FunctionAppName.azurewebsites.net"
+}
 Write-Host "Application Insights: $appInsightsName"
 Write-Host "Syslog Server: $SyslogServer"
 Write-Host "Syslog Port: $SyslogPort"
