@@ -92,7 +92,9 @@ if (-not $storageAccount) {
     $storageAccount = New-AzStorageAccount -ResourceGroupName $ResourceGroupName `
         -Name $StorageAccountName `
         -Location $Location `
-        -SkuName Standard_LRS
+        -SkuName Standard_LRS `
+        -MinimumTlsVersion TLS1_2 `
+        -EnableHttpsTrafficOnly $true
 }
 
 # Create Application Insights
@@ -166,8 +168,17 @@ if ($existingApp) {
             -OSType "Windows" `
             -ApplicationInsightsKey $appInsights.InstrumentationKey `
             -DisableApplicationInsights:$false
-    }
+    }  
 }
+
+# Configure TLS and HTTPS settings using resource manager API
+Write-Host "Configuring TLS and HTTPS settings..."
+$functionAppResource = Get-AzResource -ResourceGroupName $ResourceGroupName -ResourceName $FunctionAppName -ResourceType "Microsoft.Web/sites"
+$functionAppProperties = @{
+    "httpsOnly" = $true
+    "minTlsVersion" = "1.2"
+}
+Set-AzResource -ResourceId $functionAppResource.ResourceId -Properties $functionAppProperties -Force
 
 # Configure runtime versions
 Write-Host "Configuring runtime versions..."
@@ -175,6 +186,8 @@ $runtimeSettings = @{
     "FUNCTIONS_WORKER_RUNTIME" = "powershell"
     "FUNCTIONS_WORKER_RUNTIME_VERSION" = "7.4"
     "FUNCTIONS_EXTENSION_VERSION" = "~4"
+    "WEBSITE_RUN_FROM_PACKAGE" = "0"  # Enable in-portal editing
+    "WEBSITE_HTTPSONLY" = "1"  # Force HTTPS
 }
 Update-AzFunctionAppSetting -Name $FunctionAppName -ResourceGroupName $ResourceGroupName -AppSetting $runtimeSettings
 
@@ -318,4 +331,9 @@ Write-Host "Syslog Server: $SyslogServer"
 Write-Host "Syslog Port: $SyslogPort"
 Write-Host "Protocol: $Protocol"
 Write-Host "Event Hub Name: $EventHubName"
-Write-Host "Event Hub Connection: [Hidden for security]" 
+Write-Host "Event Hub Connection: [Hidden for security]"
+
+Write-Host "`nSecurity Configurations:"
+Write-Host "- HTTPS Only: Enabled"
+Write-Host "- Minimum TLS Version: 1.2"
+Write-Host "- Storage Account: HTTPS Traffic Only Enabled" 
