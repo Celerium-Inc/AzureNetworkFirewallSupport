@@ -175,49 +175,63 @@ Rules are processed in this order:
    ```
 
 2. Execute the deployment script:
-   ```powershell
-   ./block/deploy.ps1 `
-       -ResourceGroupName "your-rg" `
-       -Location "your-loc" `
-       -FunctionAppName "your-func-name" `
-       -FirewallPolicyName "your-policy" `
-       -FirewallName "your-firewall" `
-       -TenantId "your-tenant-id" `
-       -ClientId "your-client-id" `
-       -ClientSecret "your-client-secret" `
-       -BlocklistUrl "https://your-blocklist-url"
-   ```
 
-   - For US Gov (or other sovereign clouds), pass the cloud parameter:
-   ```powershell
-   ./block/deploy.ps1 `
-       -ResourceGroupName "your-rg" `
-       -Location "your-loc" `
-       -FunctionAppName "your-func-name" `
-       -FirewallPolicyName "your-policy" `
-       -FirewallName "your-firewall" `
-       -TenantId "your-tenant-id" `
-       -ClientId "your-client-id" `
-       -ClientSecret "your-client-secret" `
-       -BlocklistUrl "https://your-blocklist-url" `
-       -AzureCloud AzureUSGovernment
-   ```
+### Deployment Scenarios
 
-   - Or use explicit overrides (take precedence over cloud selection):
-   ```powershell
-   ./block/deploy.ps1 `
-       -ResourceGroupName "your-rg" `
-       -Location "your-loc" `
-       -FunctionAppName "your-func-name" `
-       -FirewallPolicyName "your-policy" `
-       -FirewallName "your-firewall" `
-       -TenantId "your-tenant-id" `
-       -ClientId "your-client-id" `
-       -ClientSecret "your-client-secret" `
-       -BlocklistUrl "https://your-blocklist-url" `
-       -AuthorityHost "https://login.microsoftonline.us" `
-       -ArmEndpoint "https://management.usgovcloudapi.net"
-   ```
+#### Scenario 1: Standard Deployment
+**Best for:** Timer-triggered workloads, cost optimization
+
+```powershell
+./block/deploy.ps1 `
+    -ResourceGroupName "your-rg" `
+    -Location "eastus" `
+    -FunctionAppName "your-func-name" `
+    -FirewallPolicyName "your-policy" `
+    -FirewallName "your-firewall" `
+    -TenantId "your-tenant-id" `
+    -ClientId "your-client-id" `
+    -ClientSecret "your-client-secret" `
+    -BlocklistUrl "https://your-blocklist-url" `
+    -AppServicePlanName "existing-plan-name" `
+    -AppServicePlanResourceGroup "plan-rg"  # Optional, defaults to same RG
+```
+
+#### Scenario 2: Azure US Government Cloud
+**Note:** Use any hosting plan
+
+```powershell
+./block/deploy.ps1 `
+    -ResourceGroupName "your-rg" `
+    -Location "usgovvirginia" `
+    -FunctionAppName "your-func-name" `
+    -FirewallPolicyName "your-policy" `
+    -FirewallName "your-firewall" `
+    -TenantId "your-tenant-id" `
+    -ClientId "your-client-id" `
+    -ClientSecret "your-client-secret" `
+    -BlocklistUrl "https://your-blocklist-url" `
+    -AppServicePlanName "existing-plan-name" `
+    -AzureCloud AzureUSGovernment
+```
+
+#### Scenario 3: Custom Cloud Endpoints (Advanced)
+**Use case:** Custom sovereign cloud configurations
+
+```powershell
+./block/deploy.ps1 `
+    -ResourceGroupName "your-rg" `
+    -Location "your-loc" `
+    -FunctionAppName "your-func-name" `
+    -FirewallPolicyName "your-policy" `
+    -FirewallName "your-firewall" `
+    -TenantId "your-tenant-id" `
+    -ClientId "your-client-id" `
+    -ClientSecret "your-client-secret" `
+    -BlocklistUrl "https://your-blocklist-url" `
+    -AppServicePlanName "existing-plan-name" `
+    -AuthorityHost "https://login.microsoftonline.us" `
+    -ArmEndpoint "https://management.usgovcloudapi.net"
+```
 
 3. After deployment, the function will create:
    - A rule collection group named "CeleriumRuleCollectionGroup" (priority 100)

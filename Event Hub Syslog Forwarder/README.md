@@ -24,6 +24,7 @@ Azure Function that forwards syslog messages to Azure Event Hub. Supports both U
   - Az.Functions
   - Az.EventHub
   - Az.ApplicationInsights
+- Existing App Service Plan (required)
 
 
 ## Configuration
@@ -60,29 +61,44 @@ These commands have been tested via cloud shell
    ```
 
 2. Deploy using PowerShell:
-```powershell
-./forward/deploy.ps1 `
-    -ResourceGroupName "your-rg" `
-    -Location "your-loc" `
-    -FunctionAppName "your-func-name" `
-    -SyslogServer "syslog.example.com" `
-    -SyslogPort 514 `
-    -EventHubName "your-eventhub" `
-    -EventHubConnection "your-connection-string" `
-    -Protocol "SSL"  # Optional, defaults to SSL
-```
 
-For Azure US Government (or other sovereign clouds):
+### Deployment Scenarios
+
+> **Note**: All deployments require an existing App Service Plan. Create your App Service Plan first, then use `-AppServicePlanName` to reference it.
+
+#### Scenario 1: Standard Deployment
+
 ```powershell
+# First, find existing App Service Plans in your subscription
+Get-AzAppServicePlan | Select-Object Name, ResourceGroup, Sku
+
+# Deploy using an existing plan
 ./forward/deploy.ps1 `
     -ResourceGroupName "your-rg" `
-    -Location "your-loc" `
+    -Location "eastus" `
     -FunctionAppName "your-func-name" `
     -SyslogServer "syslog.example.com" `
     -SyslogPort 514 `
     -EventHubName "your-eventhub" `
     -EventHubConnection "your-connection-string" `
     -Protocol "SSL" `
+    -AppServicePlanName "existing-plan-name" `
+    -AppServicePlanResourceGroup "plan-rg"  # Optional, defaults to same RG
+```
+
+#### Scenario 2: Azure US Government Cloud
+
+```powershell
+./forward/deploy.ps1 `
+    -ResourceGroupName "your-rg" `
+    -Location "usgovvirginia" `
+    -FunctionAppName "your-func-name" `
+    -SyslogServer "syslog.example.com" `
+    -SyslogPort 514 `
+    -EventHubName "your-eventhub" `
+    -EventHubConnection "your-connection-string" `
+    -Protocol "SSL" `
+    -AppServicePlanName "existing-plan-name" `
     -AzureCloud AzureUSGovernment
 ```
 
@@ -158,10 +174,3 @@ For sovereign clouds (e.g., US Gov):
     -AzureCloud AzureUSGovernment
 ```
 
-## Documentation
-
-### [API Reference](API-Reference.md)
-- API endpoints and usage
-- Message format specifications
-- Error handling
-- Implementation details 
