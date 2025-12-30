@@ -37,7 +37,7 @@ param(
     [Parameter(Mandatory = $false)]
     [string]$ArmEndpoint,
 
-    # App Service Plan Parameters (OPTIONAL - will create Consumption plan if not provided)
+    # App Service Plan Parameters (OPTIONAL - will create Basic B1 plan if not provided)
     [Parameter(Mandatory = $false)]
     [string]$AppServicePlanName,
 
@@ -188,7 +188,7 @@ if (-not $AppServicePlanName) {
     $AppServicePlanName = "$FunctionAppName-plan"
     $AppServicePlanResourceGroup = $ResourceGroupName
     
-    Write-Host "No App Service Plan specified. Creating default Consumption plan: $AppServicePlanName"
+    Write-Host "No App Service Plan specified. Creating default Basic (B1) plan: $AppServicePlanName"
     
     $appServicePlan = Get-AzAppServicePlan -ResourceGroupName $AppServicePlanResourceGroup -Name $AppServicePlanName -ErrorAction SilentlyContinue
     
@@ -211,16 +211,19 @@ if (-not $AppServicePlanName) {
     }
     
     if ($needsCreation) {
-        # Create Consumption plan (Y1/Dynamic) using ARM API - works in both Azure Public and Azure Government clouds
-        Write-Host "Creating Consumption plan (Y1) via ARM API..."
+        # Create Basic B1 plan using ARM API - works in both Azure Public and Azure Government clouds
+        Write-Host "Creating Basic (B1) plan via ARM API..."
         
         $planProperties = @{
             reserved = $false  # Windows plan (set to $true for Linux)
         }
         
         $planSku = @{
-            name = "Y1"
-            tier = "Dynamic"
+            name = "B1"
+            tier = "Basic"
+            size = "B1"
+            family = "B"
+            capacity = 1
         }
         
         $appServicePlan = New-AzResource `
@@ -236,7 +239,7 @@ if (-not $AppServicePlanName) {
         # Refresh the plan object to get full details
         $appServicePlan = Get-AzAppServicePlan -ResourceGroupName $AppServicePlanResourceGroup -Name $AppServicePlanName
         
-        Write-Host "Created Consumption plan: $AppServicePlanName" -ForegroundColor Green
+        Write-Host "Created Basic (B1) plan: $AppServicePlanName" -ForegroundColor Green
     }
 } else {
     # Verify the explicitly provided App Service Plan exists

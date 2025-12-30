@@ -178,8 +178,26 @@ Rules are processed in this order:
 
 ### Deployment Scenarios
 
-#### Scenario 1: Standard Deployment
+> **Note**: App Service Plan is optional. If not specified, a Basic (B1) plan will be automatically created. You can also specify an existing plan with `-AppServicePlanName`.
+
+#### Scenario 1: Simple Deployment (Auto-creates Basic B1 Plan)
 **Best for:** Timer-triggered workloads, cost optimization
+
+```powershell
+./block/deploy.ps1 `
+    -ResourceGroupName "your-rg" `
+    -Location "eastus" `
+    -FunctionAppName "your-func-name" `
+    -FirewallPolicyName "your-policy" `
+    -FirewallName "your-firewall" `
+    -TenantId "your-tenant-id" `
+    -ClientId "your-client-id" `
+    -ClientSecret "your-client-secret" `
+    -BlocklistUrl "https://your-blocklist-url"
+```
+
+#### Scenario 2: Use Existing App Service Plan
+**Best for:** Premium or Dedicated hosting requirements
 
 ```powershell
 ./block/deploy.ps1 `
@@ -196,10 +214,24 @@ Rules are processed in this order:
     -AppServicePlanResourceGroup "plan-rg"  # Optional, defaults to same RG
 ```
 
-#### Scenario 2: Azure US Government Cloud
-**Note:** Use any hosting plan
+#### Scenario 3: Azure US Government Cloud
+**Note:** Works with auto-created Basic B1 plan or existing plans
 
 ```powershell
+# With auto-created Basic B1 plan
+./block/deploy.ps1 `
+    -ResourceGroupName "your-rg" `
+    -Location "usgovvirginia" `
+    -FunctionAppName "your-func-name" `
+    -FirewallPolicyName "your-policy" `
+    -FirewallName "your-firewall" `
+    -TenantId "your-tenant-id" `
+    -ClientId "your-client-id" `
+    -ClientSecret "your-client-secret" `
+    -BlocklistUrl "https://your-blocklist-url" `
+    -AzureCloud AzureUSGovernment
+
+# Or with an existing plan
 ./block/deploy.ps1 `
     -ResourceGroupName "your-rg" `
     -Location "usgovvirginia" `
@@ -214,7 +246,7 @@ Rules are processed in this order:
     -AzureCloud AzureUSGovernment
 ```
 
-#### Scenario 3: Custom Cloud Endpoints (Advanced)
+#### Scenario 4: Custom Cloud Endpoints (Advanced)
 **Use case:** Custom sovereign cloud configurations
 
 ```powershell
@@ -228,7 +260,6 @@ Rules are processed in this order:
     -ClientId "your-client-id" `
     -ClientSecret "your-client-secret" `
     -BlocklistUrl "https://your-blocklist-url" `
-    -AppServicePlanName "existing-plan-name" `
     -AuthorityHost "https://login.microsoftonline.us" `
     -ArmEndpoint "https://management.usgovcloudapi.net"
 ```
