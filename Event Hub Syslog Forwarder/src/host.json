@@ -14,7 +14,15 @@
     },
     "extensionBundle": {
         "id": "Microsoft.Azure.Functions.ExtensionBundle",
-        "version": "[3.*, 4.0.0)"
+        "version": "[4.0.0, 5.0.0)"
+    },
+    "extensions": {
+        "eventHubs": {
+            "maxEventBatchSize": 128,
+            "prefetchCount": 256,
+            "batchCheckpointFrequency": 1,
+            "targetUnprocessedEventThreshold": 1000
+        }
     },
     "managedDependency": {
         "enabled": true

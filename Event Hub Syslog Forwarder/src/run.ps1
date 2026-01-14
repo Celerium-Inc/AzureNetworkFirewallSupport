@@ -47,68 +47,195 @@ $successfullyProcessedCount = 0
 
 #region Utility Functions
 
-# Function to send message to syslog with error handling
-function SendToSyslog
+function Get-IntEnvOrDefault {
+    param(
+        [string]$Name,
+        [int]$DefaultValue
+    )
+
+    $raw = (Get-Item -Path ("env:{0}" -f $Name) -ErrorAction SilentlyContinue).Value
+    if ([string]::IsNullOrWhiteSpace($raw)) { return $DefaultValue }
+
+    $val = 0
+    if ([int]::TryParse($raw, [ref]$val)) { return $val }
+    return $DefaultValue
+}
+
+function Close-SyslogSslSession {
+    param(
+        [hashtable]$Session
+    )
+    try {
+        if ($Session.SslStream)     { $Session.SslStream.Close() }
+    } catch {}
+    try {
+        if ($Session.NetworkStream) { $Session.NetworkStream.Close() }
+    } catch {}
+    try {
+        if ($Session.TcpClient)    { $Session.TcpClient.Close() }
+    } catch {}
+}
+
+function New-SyslogSslSession {
+    param(
+        [string]$Server,
+        [int]$Port,
+        [int]$ConnectTimeoutMs,
+        [int]$IoTimeoutMs
+    )
+
+    $tcpClient = New-Object System.Net.Sockets.TcpClient
+    $networkStream = $null
+    $sslStream = $null
+
+    # Fail-fast connect using async wait handle
+    $iar = $tcpClient.BeginConnect($Server, $Port, $null, $null)
+    if (-not $iar.AsyncWaitHandle.WaitOne($ConnectTimeoutMs, $false)) {
+        $tcpClient.Close()
+        throw "TCP connect timed out after ${ConnectTimeoutMs}ms to $Server`:$Port"
+    }
+    $tcpClient.EndConnect($iar)
+
+    # Apply IO timeouts on the socket
+    $tcpClient.SendTimeout    = $IoTimeoutMs
+    $tcpClient.ReceiveTimeout = $IoTimeoutMs
+
+    $networkStream = $tcpClient.GetStream()
+    $networkStream.ReadTimeout  = $IoTimeoutMs
+    $networkStream.WriteTimeout = $IoTimeoutMs
+
+    # Wrap the network stream with an SSL stream
+    # NOTE: This accepts any cert (your prior behavior). Tighten this later if/when you have the CA/thumbprint.
+    $sslStream = New-Object System.Net.Security.SslStream($networkStream, $false, { $true })
+
+    # Authenticate SSL (uses underlying stream timeouts)
+    $sslStream.AuthenticateAsClient($Server)
+
+    return @{
+        TcpClient     = $tcpClient
+        NetworkStream = $networkStream
+        SslStream     = $sslStream
+    }
+}
+
+# NEW: Send a whole batch over a single connection (Fix B) + retries/backoff (Fix A)
+function SendToSyslogBatch
 {
     param (
-        [string]$Message,    # The formatted syslog message to send
-        [string]$Server,     # Syslog server hostname/IP
-        [int]$Port,         # Syslog server port
-        [string]$Protocol   # SSL or UDP
+        [string[]]$Messages,
+        [string]$Server,
+        [int]$Port,
+        [string]$Protocol
     )
-    try
-    {
+
+    if (-not $Messages -or $Messages.Count -eq 0) {
+        return $true
+    }
+
+    # Timeouts (your existing Fix #1 behavior)
+    $connectTimeoutMs = Get-IntEnvOrDefault -Name "SYSLOG_CONNECT_TIMEOUT_MS" -DefaultValue 5000
+    $ioTimeoutMs      = Get-IntEnvOrDefault -Name "SYSLOG_IO_TIMEOUT_MS"      -DefaultValue 5000
+
+    # Retries/backoff (Fix A)
+    $maxRetries       = Get-IntEnvOrDefault -Name "SYSLOG_MAX_RETRIES"         -DefaultValue 3
+    $baseBackoffMs    = Get-IntEnvOrDefault -Name "SYSLOG_RETRY_BACKOFF_MS"    -DefaultValue 500
+    $maxBackoffMs     = Get-IntEnvOrDefault -Name "SYSLOG_RETRY_BACKOFF_MAX_MS" -DefaultValue 5000
+
+    try {
         if ($Protocol -eq "SSL") {
-            # Establish a TCP connection for SSL
-            $tcpClient = New-Object System.Net.Sockets.TcpClient
-            $networkStream = $null
-            $sslStream = $null
-            
-            try {
-                $tcpClient.Connect($Server, $Port)
-                $networkStream = $tcpClient.GetStream()
 
-                # Wrap the network stream with an SSL stream
-                $sslStream = New-Object System.Net.Security.SslStream($networkStream, $false, { $true }) # Accepts any cert, change if needed
-                $sslStream.AuthenticateAsClient($Server)
+            $startIndex = 0
+            for ($attempt = 0; $attempt -le $maxRetries; $attempt++) {
+                $session = $null
+                try {
+                    $session = New-SyslogSslSession -Server $Server -Port $Port -ConnectTimeoutMs $connectTimeoutMs -IoTimeoutMs $ioTimeoutMs
 
-                # Convert message to bytes and send over SSL
-                $syslogBytes = [System.Text.Encoding]::UTF8.GetBytes($Message + "`n")
-                $sslStream.Write($syslogBytes, 0, $syslogBytes.Length)
-                $sslStream.Flush()
-            }
-            finally {
-                # Ensure proper cleanup of resources
-                if ($sslStream) { $sslStream.Close() }
-                if ($networkStream) { $networkStream.Close() }
-                if ($tcpClient) { $tcpClient.Close() }
+                    for ($i = $startIndex; $i -lt $Messages.Count; $i++) {
+                        $msg = $Messages[$i]
+                        $bytes = [System.Text.Encoding]::UTF8.GetBytes($msg + "`n")
+                        $session.SslStream.Write($bytes, 0, $bytes.Length)
+                    }
+
+                    $session.SslStream.Flush()
+
+                    # Success
+                    Write-Host "Sent batch to syslog over SSL: count=$($Messages.Count)"
+                    Close-SyslogSslSession -Session $session
+                    return $true
+                }
+                catch {
+                    $err = $_
+
+                    Write-Error "Failed to send batch to syslog over SSL (attempt $attempt of $maxRetries): $err"
+
+                    if ($session) { Close-SyslogSslSession -Session $session }
+
+                    if ($attempt -lt $maxRetries) {
+                        $sleepMs = [Math]::Min($maxBackoffMs, ($baseBackoffMs * ($attempt + 1)))
+                        Start-Sleep -Milliseconds $sleepMs
+                        continue
+                    }
+
+                    # Give up after retries
+                    return $false
+                }
             }
         }
         else {
-            # Send over UDP
+            # UDP (unchanged conceptually, but reuse a single udp client per batch)
             $udpClient = New-Object System.Net.Sockets.UdpClient
             try {
-                $syslogBytes = [System.Text.Encoding]::UTF8.GetBytes($Message)
-                $udpClient.Send($syslogBytes, $syslogBytes.Length, $Server, $Port) | Out-Null
+                $udpClient.Client.SendTimeout = $ioTimeoutMs
+
+                for ($attempt = 0; $attempt -le $maxRetries; $attempt++) {
+                    try {
+                        foreach ($msg in $Messages) {
+                            $bytes = [System.Text.Encoding]::UTF8.GetBytes($msg)
+                            $udpClient.Send($bytes, $bytes.Length, $Server, $Port) | Out-Null
+                        }
+
+                        Write-Host "Sent batch to syslog over UDP: count=$($Messages.Count)"
+                        return $true
+                    }
+                    catch {
+                        Write-Error "Failed to send batch to syslog over UDP (attempt $attempt of $maxRetries): $_"
+                        if ($attempt -lt $maxRetries) {
+                            $sleepMs = [Math]::Min($maxBackoffMs, ($baseBackoffMs * ($attempt + 1)))
+                            Start-Sleep -Milliseconds $sleepMs
+                            continue
+                        }
+                        return $false
+                    }
+                }
             }
             finally {
                 $udpClient.Close()
             }
         }
+    }
+    catch {
+        Write-Error "SendToSyslogBatch unexpected error: $_"
+        return $false
+    }
+}
 
-        Write-Host "Sent message to syslog over $Protocol`: $Message"
-    }
-    catch
-    {
-        Write-Error "Failed to send message to syslog over $Protocol`: $_"
-    }
+# Kept for compatibility (still works), but main path now uses SendToSyslogBatch (Fix B)
+function SendToSyslog
+{
+    param (
+        [string]$Message,
+        [string]$Server,
+        [int]$Port,
+        [string]$Protocol
+    )
+    [void](SendToSyslogBatch -Messages @($Message) -Server $Server -Port $Port -Protocol $Protocol)
 }
 
 # Function to convert timestamps to RFC3339 format (ISO 8601) with UTC timezone
 function ConvertTo-RFC3339
 {
     param (
-        [string]$timestamp  # Input timestamp to be converted
+        [string]$timestamp
     )
     try
     {
@@ -125,33 +252,92 @@ function ConvertTo-RFC3339
     catch
     {
         Write-Error "Failed to convert timestamp: $timestamp - Error: $_"
-        return $timestamp  # Return original timestamp as a fallback
+        return $timestamp
     }
+}
+
+# NEW PATCH: works for PSCustomObject AND Hashtable/OrderedHashtable records
+function Resolve-RecordTimestampRfc3339 {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Record,
+
+        [string[]]$PreferredFields = @("time", "TimeGenerated", "TimeProcessed", "_TimeReceived"),
+
+        [switch]$LogFallback
+    )
+
+    function Get-FieldValue {
+        param([object]$Obj, [string]$Field)
+
+        # Hashtable / OrderedHashtable
+        if ($Obj -is [System.Collections.IDictionary]) {
+            if ($Obj.Contains($Field)) {
+                return [string]$Obj[$Field]
+            }
+            return $null
+        }
+
+        # PSCustomObject / normal object properties
+        try {
+            $p = $Obj.PSObject.Properties[$Field]
+            if ($null -ne $p) { return [string]$p.Value }
+        } catch {}
+
+        # Last attempt: dot access (some adapters)
+        try {
+            $v = $Obj.$Field
+            if ($null -ne $v) { return [string]$v }
+        } catch {}
+
+        return $null
+    }
+
+    $rawTs = $null
+    foreach ($field in $PreferredFields) {
+        $val = Get-FieldValue -Obj $Record -Field $field
+        if (-not [string]::IsNullOrWhiteSpace($val)) {
+            $rawTs = $val
+            break
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($rawTs)) {
+        $rawTs = (Get-Date).ToUniversalTime().ToString("o")  # always parseable
+        if ($LogFallback) {
+            $keys = $null
+            if ($Record -is [System.Collections.IDictionary]) {
+                $keys = ($Record.Keys | ForEach-Object { $_.ToString() } | Sort-Object) -join ", "
+            } else {
+                $keys = ($Record.PSObject.Properties.Name | Sort-Object) -join ", "
+            }
+            Write-Warning "No usable timestamp on record; using current UTC time. RecordType=$($Record.GetType().FullName) Keys=$keys"
+        }
+    }
+
+    return ConvertTo-RFC3339 -timestamp $rawTs
 }
 
 #endregion
 
 #region Log Processing Functions
 
-# Function to parse DestPublicIps for ExternalPublic and AzurePublic flow types
 function Parse-DestPublicIps
 {
     param (
-        [string]$FlowType,           # The flow type (for logging purposes)
-        [string]$DestPublicIps,      # The DestPublicIps field content
-        [string]$FlowDirection,      # Flow direction (Inbound/Outbound)
-        [string]$L7Protocol          # L7 protocol (HTTP, HTTPS, Unknown, etc.)
+        [string]$FlowType,
+        [string]$DestPublicIps,
+        [string]$FlowDirection,
+        [string]$L7Protocol
     )
-    
+
     $publicIpEntries = @()
-    
-    # Filter: Skip AzurePublic flows with Inbound direction and Unknown L7Protocol
+
     if ($FlowType -eq "AzurePublic" -and $FlowDirection -eq "Inbound" -and $L7Protocol -eq "Unknown") {
         Write-Host "Skipping AzurePublic Inbound flow with Unknown L7Protocol"
         return @()
     }
-    
-    # Parse DestPublicIps format: Multiple space-separated entries, only extract indexes 0 (IP), 5 (outbound bytes), 6 (inbound bytes)
+
     if ($DestPublicIps -and $DestPublicIps -ne "") {
         $destPublicIpsEntries = $DestPublicIps -split ' '
         foreach ($entry in $destPublicIpsEntries) {
@@ -161,12 +347,11 @@ function Parse-DestPublicIps
                     $publicIpAddress = $entryParts[0]
                     $outboundBytes = $entryParts[5]
                     $inboundBytes = $entryParts[6]
-                    
-                    # Only include entries with actual traffic (non-zero bytes)
+
                     try {
                         $outboundBytesInt = [int]$outboundBytes
                         $inboundBytesInt = [int]$inboundBytes
-                        
+
                         if ($outboundBytesInt -gt 0 -or $inboundBytesInt -gt 0) {
                             $publicIpEntries += @{
                                 PublicIp = $publicIpAddress
@@ -188,29 +373,26 @@ function Parse-DestPublicIps
     } else {
         Write-Warning "DestPublicIps field is empty or missing for $FlowType flow type"
     }
-    
+
     return $publicIpEntries
 }
 
-# Function to process Virtual Network Flow Logs
 function Process-FlowLog
 {
     param (
-        [PSCustomObject]$record
+        $record
     )
-    
-    $syslogMessages = @()
-    
-    # Process Virtual Network Flow Logs
-    # These logs contain information about traffic flows through NSGs
-    $timestamp = ConvertTo-RFC3339 -timestamp $record.TimeGenerated
-    $timeProcessed = ConvertTo-RFC3339 -timestamp $record.TimeProcessed
-    $flowIntervalStart = ConvertTo-RFC3339 -timestamp $record.FlowIntervalStartTime
-    $flowIntervalEnd = ConvertTo-RFC3339 -timestamp $record.FlowIntervalEndTime
-    $flowStartTime = ConvertTo-RFC3339 -timestamp $record.FlowStartTime
-    $flowEndTime = ConvertTo-RFC3339 -timestamp $record.FlowEndTime
 
-    # Extract and map fields from the payload
+    $syslogMessages = @()
+
+    # Use robust timestamp resolver
+    $timestamp         = Resolve-RecordTimestampRfc3339 -Record $record -PreferredFields @("TimeGenerated","time","_TimeReceived") -LogFallback
+    $timeProcessed     = Resolve-RecordTimestampRfc3339 -Record $record -PreferredFields @("TimeProcessed","TimeGenerated","time","_TimeReceived")
+    $flowIntervalStart = Resolve-RecordTimestampRfc3339 -Record $record -PreferredFields @("FlowIntervalStartTime","TimeGenerated","time","_TimeReceived")
+    $flowIntervalEnd   = Resolve-RecordTimestampRfc3339 -Record $record -PreferredFields @("FlowIntervalEndTime","TimeGenerated","time","_TimeReceived")
+    $flowStartTime     = Resolve-RecordTimestampRfc3339 -Record $record -PreferredFields @("FlowStartTime","TimeGenerated","time","_TimeReceived")
+    $flowEndTime       = Resolve-RecordTimestampRfc3339 -Record $record -PreferredFields @("FlowEndTime","TimeGenerated","time","_TimeReceived")
+
     $faSchemaVersion = $record.FaSchemaVersion
     $isFlowCapturedAtUdrHop = $record.IsFlowCapturedAtUdrHop
     $srcIp = $record.SrcIp
@@ -219,23 +401,22 @@ function Process-FlowLog
     $flowType = $record.FlowType
     $bytesDestToSrc = $record.BytesDestToSrc
     $bytesSrcToDest = $record.BytesSrcToDest
-    
+
     $protocol = $record.L4Protocol
     $l7Protocol = $record.L7Protocol
     $flowDirection = $record.FlowDirection
-    
-    # Parse DestPublicIps only for ExternalPublic or AzurePublic flow types
+
     $publicIpEntries = @()
     if ($flowType -eq "ExternalPublic" -or $flowType -eq "AzurePublic") {
         $publicIpEntries = Parse-DestPublicIps -FlowType $flowType -DestPublicIps $record.DestPublicIps -FlowDirection $flowDirection -L7Protocol $l7Protocol
     }
+
     $flowStatus = $record.FlowStatus
     $macAddress = $record.MacAddress
     $flowLogResourceId = $record.FlowLogResourceId
     $targetResourceId = $record.TargetResourceId
     $targetResourceType = $record.TargetResourceType
 
-    # Map destination-related fields (renamed to Dest* to match payload)
     $destSubscription = $record.DestSubscription
     $destRegion = $record.DestRegion
     $destNic = $record.DestNic
@@ -253,13 +434,11 @@ function Process-FlowLog
     $aclGroup = $record.AclGroup
     $aclRule = $record.AclRule
 
-    # Additional fields from the payload
     $itemId = $record._ItemId
     $workspaceResourceId = $record._Internal_WorkspaceResourceId
     $eventType = $record.Type
     $tenantId = $record.TenantId
 
-    # Create syslog message template (reusable for all entries)
     $syslogTemplate = "<13>TimeGenerated=${timestamp} Type=FlowLog FaSchemaVersion=${faSchemaVersion} " +             `
                           "TimeProcessed=${timeProcessed} FlowIntervalStart=${flowIntervalStart} FlowIntervalEnd=${flowIntervalEnd} " +             `
                           "FlowStartTime=${flowStartTime} FlowEndTime=${flowEndTime} FlowType=${flowType} " +             `
@@ -274,34 +453,28 @@ function Process-FlowLog
                           "AclGroup=${aclGroup} AclRule=${aclRule} ItemId=${itemId} WorkspaceResourceId=${workspaceResourceId} " +             `
                           "EventType=${eventType} TenantId=${tenantId}"
 
-    # Generate syslog messages using the template
     if ($publicIpEntries.Count -gt 0) {
-        # Create separate syslog messages for each public IP entry with traffic
         foreach ($publicIpEntry in $publicIpEntries) {
             $syslogMessage = $syslogTemplate -f $publicIpEntry.PublicIp, $publicIpEntry.InboundBytes, $publicIpEntry.OutboundBytes
             $syslogMessages += $syslogMessage
         }
     } else {
-        # Use original data when no public IP entries with traffic are found
         $syslogMessage = $syslogTemplate -f $destIp, $bytesDestToSrc, $bytesSrcToDest
         $syslogMessages += $syslogMessage
     }
-    
+
     return $syslogMessages
 }
 
-# Function to process Azure Firewall DNS Query Logs
 function Process-DnsQueryLog
 {
     param (
-        [PSCustomObject]$record
+        $record
     )
-    
+
     $syslogMessages = @()
-    
-    # Process Azure Firewall DNS Query Logs
-    # These logs contain information about DNS queries processed by Azure Firewall
-    $timestamp = ConvertTo-RFC3339 -timestamp $record.time
+
+    $timestamp = Resolve-RecordTimestampRfc3339 -Record $record -PreferredFields @("time","TimeGenerated","_TimeReceived") -LogFallback
     $resourceId = $record.resourceId
     $sourceIp = $record.properties.SourceIp
     $sourcePort = $record.properties.SourcePort
@@ -320,7 +493,6 @@ function Process-DnsQueryLog
     $errorNumber = $record.properties.ErrorNumber
     $errorMessage = $record.properties.ErrorMessage
 
-    # Format the syslog message for DNS logs
     $syslogMessage = "<13>TimeGenerated=${timestamp} Type=DnsQueryLog " +             `
                          "ResourceId=${resourceId} SrcIp=${sourceIp} SrcPort=${sourcePort} QueryId=${queryId} " +             `
                          "QueryType=${queryType} QueryClass=${queryClass} QueryName=${queryName} Protocol=${protocol} " +             `
@@ -328,22 +500,19 @@ function Process-DnsQueryLog
                          "ResponseCode=${responseCode} ResponseFlags=${responseFlags} ResponseSize=${responseSize} " +             `
                          "RequestDurationSecs=${requestDurationSecs} ErrorNumber=${errorNumber} ErrorMessage=${errorMessage}"
     $syslogMessages += $syslogMessage
-    
+
     return $syslogMessages
 }
 
-# Function to process Azure Firewall DNS Response Logs
 function Process-DnsResponseLog
 {
     param (
-        [PSCustomObject]$record
+        $record
     )
-    
+
     $syslogMessages = @()
-    
-    # Process Azure Firewall DNS Response Logs
-    # These logs contain detailed information about DNS responses including answer records
-    $timestamp = ConvertTo-RFC3339 -timestamp $record.time
+
+    $timestamp = Resolve-RecordTimestampRfc3339 -Record $record -PreferredFields @("time","TimeGenerated","_TimeReceived") -LogFallback
     $resourceId = $record.resourceId
     $operationName = $record.operationName
     $version = $record.properties.version
@@ -364,7 +533,6 @@ function Process-DnsResponseLog
     $resolverPolicyId = $record.properties.resolverpolicy_id
     $resolverPolicyRuleAction = $record.properties.resolverpolicy_rule_action
 
-    # Process each DNS answer in the response
     $answerIndex = 0
     foreach ($answer in $record.properties.answer)
     {
@@ -375,7 +543,6 @@ function Process-DnsResponseLog
             $dnsAnswerTTL = $answer.TTL
             $dnsAnswerRData = $answer.RData
 
-            # Format the syslog message for each answer
             $syslogMessage = "<13>TimeGenerated=${timestamp} Type=DnsResponseLog " +  `
                                  "ResourceId=${resourceId} OperationName=${operationName} Version=${version} " +  `
                                  "SubId=${subId} Region=${region} VnetId=${vnetId} QueryName=${queryName} " +  `
@@ -386,10 +553,7 @@ function Process-DnsResponseLog
                                  "DnsAnswerIndex=${answerIndex} DnsAnswerType=${dnsAnswerType} DnsAnswerClass=${dnsAnswerClass} " +  `
                                  "DnsAnswerTTL=${dnsAnswerTTL} DnsAnswerRData=${dnsAnswerRData}"
 
-            # Add message to the array
             $syslogMessages += $syslogMessage
-
-            # Increment answer index
             $answerIndex++
         }
         catch
@@ -397,22 +561,19 @@ function Process-DnsResponseLog
             Write-Error "Error processing DNS answer: $_"
         }
     }
-    
+
     return $syslogMessages
 }
 
-# Function to process Azure Firewall Network/Application Rules Logs
 function Process-FirewallLog
 {
     param (
-        [PSCustomObject]$record
+        $record
     )
-    
+
     $syslogMessages = @()
-    
-    # Process Azure Firewall Network/Application Rules Logs
-    # These logs contain information about traffic allowed/denied by firewall rules
-    $timestamp = ConvertTo-RFC3339 -timestamp $record.time
+
+    $timestamp = Resolve-RecordTimestampRfc3339 -Record $record -PreferredFields @("time","TimeGenerated","_TimeReceived") -LogFallback
     $resourceId = $record.resourceId
     $protocol = $record.properties.Protocol
     $sourceIp = $record.properties.SourceIp
@@ -426,14 +587,13 @@ function Process-FirewallLog
     $rule = $record.properties.Rule
     $actionReason = $record.properties.ActionReason
 
-    # Format the syslog message
     $syslogMessage = "<13>TimeGenerated=${timestamp} Type=FirewallLog " +             `
                          "ResourceId=${resourceId} Protocol=${protocol} SrcIp=${sourceIp} SrcPort=${sourcePort} " +             `
                          "DstIp=${destinationIp} DstPort=${destinationPort} Action=${action} " +             `
                          "Policy=${policy} RuleCollectionGroup=${ruleCollectionGroup} RuleCollection=${ruleCollection} " +             `
                          "Rule=${rule} ActionReason=${actionReason}"
     $syslogMessages += $syslogMessage
-    
+
     return $syslogMessages
 }
 
@@ -441,18 +601,14 @@ function Process-FirewallLog
 
 #region Main Processing Logic
 
-# Process each event from the Event Hub message batch
 foreach ($event in $eventHubMessages)
 {
+    $syslogMessages = @()
+
     try
     {
-        # Array to store formatted syslog messages before sending
-        $syslogMessages = @()
-
-        # Log the raw event for debugging
         Write-Host "Processing event: $( $event | ConvertTo-Json -Depth 10 )"
 
-        # Convert the event to a PowerShell object if it's not already
         try {
             if ($event -is [string]) {
                 $message = $event | ConvertFrom-Json
@@ -462,70 +618,53 @@ foreach ($event in $eventHubMessages)
         }
         catch {
             Write-Error "Failed to process event: $( $event ) - Error: $_"
-            continue  # Skip this event and move to the next
+            continue
         }
 
-        # Ensure we have records to process
         if (-not $message.records) {
             Write-Error "No records found in message"
             continue
         }
 
-        # Process each record based on log type
         foreach ($record in $message.records)
         {
-            # Handle different log types by calling appropriate processing functions:
-            # 1. Virtual Network Flow Logs (SubType = FlowLog)
-            # 2. Azure Firewall DNS Query Logs (category = AZFWDnsQuery)
-            # 3. Azure Firewall DNS Response Logs (category = DnsResponse)
-            # 4. Azure Firewall Network/Application Rules Logs (default case)
-
             if ($record.SubType -eq "FlowLog")
             {
-                $recordMessages = Process-FlowLog -record $record
-                $syslogMessages += $recordMessages
+                $syslogMessages += (Process-FlowLog -record $record)
             }
             elseif ($record.category -eq "AZFWDnsQuery")
             {
-                $recordMessages = Process-DnsQueryLog -record $record
-                $syslogMessages += $recordMessages
+                $syslogMessages += (Process-DnsQueryLog -record $record)
             }
             elseif ($record.category -eq "DnsResponse")
             {
-                $recordMessages = Process-DnsResponseLog -record $record
-                $syslogMessages += $recordMessages
+                $syslogMessages += (Process-DnsResponseLog -record $record)
             }
             else
             {
-                $recordMessages = Process-FirewallLog -record $record
-                $syslogMessages += $recordMessages
+                $syslogMessages += (Process-FirewallLog -record $record)
             }
         }
 
-        # Increment successfully processed count
         $successfullyProcessedCount++
-
     }
     catch
     {
         Write-Error "Error processing event: $( $event | ConvertTo-Json -Depth 10 ) - Error: $_"
     }
 
-    # Send all collected syslog messages for this event
-    foreach ($syslogMessage in $syslogMessages)
-    {
-        try
-        {
-            SendToSyslog -Message $syslogMessage -Server $syslogServer -Port $syslogPort -Protocol $protocol
+    # Fix B: send this event's syslog messages in ONE batch (single SSL connection)
+    if ($syslogMessages.Count -gt 0) {
+        $ok = SendToSyslogBatch -Messages $syslogMessages -Server $syslogServer -Port $syslogPort -Protocol $protocol
+        if (-not $ok) {
+            # Keep behavior: log error but do not throw (so invocation doesn't fail solely due to syslog target issues)
+            Write-Error "Batch send to syslog failed after retries. count=$($syslogMessages.Count)"
         }
-        catch
-        {
-            Write-Error "Failed to send syslog message: $_"
-        }
+    } else {
+        Write-Host "No syslog messages produced for this event."
     }
 }
 
-# Log summary of processed events
 Write-Host "Successfully processed $successfullyProcessedCount out of $( $eventHubMessages.Length ) event(s)."
 
 #endregion
