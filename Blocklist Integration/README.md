@@ -23,6 +23,7 @@ This solution:
 - **Automated Updates**: Configurable timer-triggered execution
 - **API Access**: HTTP endpoints for testing and manual operations
 - **Secure Communications**: TLS 1.2 support with HTTPS-only connections
+- **Managed Identity**: Deploy enables a system-assigned managed identity. Runtime Azure auth still uses the service principal (`CLIENT_ID` / `CLIENT_SECRET`) until a later migration.
 
 ## Architecture
 

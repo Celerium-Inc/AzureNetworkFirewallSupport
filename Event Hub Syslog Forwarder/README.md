@@ -165,10 +165,13 @@ The deployment script will:
 2. Create or update storage account (auto-named from function app name)
 3. Create or update Application Insights
 4. Create or update Function App
-5. Configure runtime settings and environment variables
-6. Validate required permissions
-7. Deploy function code with retry logic (cloud-aware Kudu URL)
-8. Restart the function app
+5. Enable system-assigned managed identity (Defender for Cloud recommendation)
+6. Configure runtime settings and environment variables
+7. Validate required permissions
+8. Deploy function code with retry logic (cloud-aware Kudu URL)
+9. Restart the function app
+
+> **Note:** Enabling the system-assigned identity clears the Defender recommendation. Event Hub access still uses `EVENTHUB_CONNECTION` until a later managed-identity auth migration.
 
 ### Deployment Validation
 The script performs several validation steps:
