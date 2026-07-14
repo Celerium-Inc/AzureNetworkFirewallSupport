@@ -446,6 +446,48 @@ if ($elapsed -ge $maxWaitTime) {
     Write-Host "Warning: Function App may not be fully ready, but proceeding with deployment" -ForegroundColor Yellow
 }
 
+# Enable system-assigned managed identity (Defender for Cloud recommendation)
+Write-Host "Enabling system-assigned managed identity..."
+try {
+    $identityParams = @{
+        Name              = $FunctionAppName
+        ResourceGroupName = $ResourceGroupName
+        Force             = $true
+        ErrorAction       = "Stop"
+    }
+    $updateCmd = Get-Command Update-AzFunctionApp -ErrorAction Stop
+    if ($updateCmd.Parameters.ContainsKey("EnableSystemAssignedIdentity")) {
+        Update-AzFunctionApp @identityParams -EnableSystemAssignedIdentity $true
+    }
+    elseif ($updateCmd.Parameters.ContainsKey("IdentityType")) {
+        Update-AzFunctionApp @identityParams -IdentityType SystemAssigned
+    }
+    else {
+        Set-AzWebApp -ResourceGroupName $ResourceGroupName -Name $FunctionAppName -AssignIdentity $true -ErrorAction Stop | Out-Null
+    }
+
+    $identityApp = Get-AzFunctionApp -Name $FunctionAppName -ResourceGroupName $ResourceGroupName -ErrorAction SilentlyContinue
+    $principalId = $null
+    if ($identityApp) {
+        if ($identityApp.PSObject.Properties["IdentityPrincipalId"]) {
+            $principalId = $identityApp.IdentityPrincipalId
+        }
+        elseif ($identityApp.Identity -and $identityApp.Identity.PrincipalId) {
+            $principalId = $identityApp.Identity.PrincipalId
+        }
+    }
+    if ($principalId) {
+        Write-Host "System-assigned managed identity enabled (PrincipalId: $principalId)" -ForegroundColor Green
+    }
+    else {
+        Write-Host "System-assigned managed identity enabled" -ForegroundColor Green
+    }
+}
+catch {
+    Write-Host "Warning: Could not enable system-assigned managed identity: $_" -ForegroundColor Yellow
+    Write-Host "Enable it manually: Function App > Identity > System assigned > On" -ForegroundColor Yellow
+}
+
 # Configure runtime versions with retry logic
 Write-Host "Configuring runtime versions..."
 $runtimeSettings = @{
