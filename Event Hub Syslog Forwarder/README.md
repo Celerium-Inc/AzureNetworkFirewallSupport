@@ -10,7 +10,8 @@ Azure Function that processes Azure Event Hub messages containing various log ty
 - **Retry with Exponential Backoff**: Automatically retry failed transmissions with configurable backoff
 - **Robust Timestamp Handling**: Flexible timestamp resolution that handles multiple record formats (PSCustomObject and Hashtable)
 - **Protocol Support**: SSL/TLS or UDP for syslog transmission
-- **Cloud Agnostic**: Works identically in Azure Public and Azure Government clouds
+- **Multi-cloud (Classic)**: Classic hosting works in Azure Public and Azure Government
+- **Flex Consumption (opt-in, public cloud)**: Linux Flex plan for secure-storage / VNet scenarios — not available in Azure Government
 - **Comprehensive Error Handling**: Detailed error logging without failing the entire function
 
 ## Prerequisites
@@ -25,7 +26,8 @@ Azure Function that processes Azure Event Hub messages containing various log ty
   - Az.Functions
   - Az.EventHub
   - Az.ApplicationInsights
-- App Service Plan (optional - Consumption plan auto-created if not specified)
+- App Service Plan (optional for Classic - Consumption plan auto-created if not specified)
+- For Flex: pass `-HostingPlan FlexConsumption` (creates a new Linux Flex app; not an in-place migrate). **Not supported** with `-AzureCloud AzureUSGovernment`.
 
 ## Supported Log Types
 
@@ -65,13 +67,16 @@ Azure Function that processes Azure Event Hub messages containing various log ty
 
 ### Runtime Environment Variables (Auto-configured)
 
-| Variable | Default |
-|----------|---------|
-| `FUNCTIONS_WORKER_RUNTIME` | powershell |
-| `FUNCTIONS_WORKER_RUNTIME_VERSION` | 7.4 |
-| `FUNCTIONS_EXTENSION_VERSION` | ~4 |
-| `APPLICATIONINSIGHTS_CONNECTION_STRING` | Auto-configured |
-| `APPINSIGHTS_INSTRUMENTATIONKEY` | Auto-configured |
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `FUNCTIONS_WORKER_RUNTIME` | powershell | **Classic only** (Flex uses `functionAppConfig`) |
+| `FUNCTIONS_WORKER_RUNTIME_VERSION` | 7.4 | **Classic only** |
+| `WEBSITE_RUN_FROM_PACKAGE` | 0 | **Classic only** (enables in-portal editing) |
+| `FUNCTIONS_EXTENSION_VERSION` | ~4 | Classic and Flex |
+| `APPLICATIONINSIGHTS_CONNECTION_STRING` | Auto-configured | Classic and Flex |
+| `APPINSIGHTS_INSTRUMENTATIONKEY` | Auto-configured | Classic and Flex |
+
+> `host.json` sets `managedDependency.enabled = false` (no PowerShell Gallery auto-install). Flex forbids managed dependencies; the forwarder does not need Gallery modules. `function.json` resolves the hub via `%EVENT_HUB_NAME%`.
 
 ## Setup
 
@@ -94,7 +99,12 @@ These commands have been tested via cloud shell
 
 ### Deployment Scenarios
 
-> **Note**: App Service Plan is optional. If not specified, a Consumption (Y1) plan will be automatically created. You can also specify an existing plan with `-AppServicePlanName`.
+> **Hosting notes**
+> - Default `-HostingPlan` is `Classic` (backwards compatible).
+> - Flex runs **only** when you pass `-HostingPlan FlexConsumption` — there is no silent Classic→Flex switch based on an existing plan SKU.
+> - Classic targeting an existing Flex app/plan (or the reverse) **throws** with a clear error. Azure does not support in-place Classic↔Flex migration — use a new Function App (and plan) name.
+> - App Service Plan is optional for Classic: if omitted, a Consumption (Y1) plan is created. Pass `-AppServicePlanName` to use an existing **Windows** plan (Basic/Premium/etc.).
+> - Prefer **single quotes** for `-EventHubConnection` (connection strings contain many `=` and `+` characters).
 
 #### Scenario 1: Simple Deployment (Auto-creates Consumption Plan)
 
@@ -107,8 +117,8 @@ These commands have been tested via cloud shell
     -SyslogServer "syslog.example.com" `
     -SyslogPort 514 `
     -EventHubName "your-eventhub" `
-    -EventHubConnection "your-connection-string" `
-    -Protocol "SSL"
+    -EventHubConnection 'your-connection-string' `
+    -Protocol SSL
 ```
 
 #### Scenario 2: Use Existing App Service Plan
@@ -125,61 +135,80 @@ Get-AzAppServicePlan | Select-Object Name, ResourceGroup, Sku
     -SyslogServer "syslog.example.com" `
     -SyslogPort 514 `
     -EventHubName "your-eventhub" `
-    -EventHubConnection "your-connection-string" `
-    -Protocol "SSL" `
+    -EventHubConnection 'your-connection-string' `
+    -Protocol SSL `
     -AppServicePlanName "existing-plan-name" `
     -AppServicePlanResourceGroup "plan-rg"  # Optional, defaults to same RG
 ```
 
-#### Scenario 3: Azure US Government Cloud
+#### Scenario 3: Azure US Government Cloud (Classic only)
+
+> Flex Consumption is **not** available in Azure Government. Do not pass `-HostingPlan FlexConsumption` with `-AzureCloud AzureUSGovernment` (the script throws a clear error).
 
 ```powershell
 # With auto-created Consumption plan
 ./forward/deploy.ps1 `
     -ResourceGroupName "your-rg" `
-    -Location "usgovvirginia" `
+    -Location "USGov Virginia" `
     -FunctionAppName "your-func-name" `
     -SyslogServer "syslog.example.com" `
     -SyslogPort 514 `
     -EventHubName "your-eventhub" `
-    -EventHubConnection "your-connection-string" `
-    -Protocol "SSL" `
+    -EventHubConnection 'your-connection-string' `
+    -Protocol SSL `
     -AzureCloud AzureUSGovernment
 
-# Or with an existing plan
+# Or with an existing Windows plan (e.g. Basic B1)
 ./forward/deploy.ps1 `
     -ResourceGroupName "your-rg" `
-    -Location "usgovvirginia" `
+    -Location "USGov Virginia" `
     -FunctionAppName "your-func-name" `
     -SyslogServer "syslog.example.com" `
     -SyslogPort 514 `
     -EventHubName "your-eventhub" `
-    -EventHubConnection "your-connection-string" `
-    -Protocol "SSL" `
+    -EventHubConnection 'your-connection-string' `
+    -Protocol SSL `
     -AppServicePlanName "existing-plan-name" `
     -AzureCloud AzureUSGovernment
+```
+
+#### Scenario 4: Flex Consumption (Linux, Azure Public only)
+**Best for:** Secure storage / VNet scenarios. Creates a **new** Linux Flex app (not an in-place Classic migrate). One app per Flex plan. PowerShell 7.4 only.
+
+```powershell
+./forward/deploy.ps1 `
+    -ResourceGroupName "your-rg" `
+    -Location "eastus" `
+    -FunctionAppName "your-func-name-flex" `
+    -SyslogServer "syslog.example.com" `
+    -SyslogPort 514 `
+    -EventHubName "your-eventhub" `
+    -EventHubConnection 'your-connection-string' `
+    -Protocol SSL `
+    -HostingPlan FlexConsumption `
+    -FlexInstanceMemoryMB 2048
 ```
 
 The deployment script will:
 1. Verify Azure connection and resource group (cloud-aware)
 2. Create or update storage account (auto-named from function app name)
 3. Create or update Application Insights
-4. Create or update Function App
+4. Create Classic ASP + Function App **or** Flex FC1 plan + Linux Flex Function App (when `-HostingPlan FlexConsumption`)
 5. Enable system-assigned managed identity (Defender for Cloud recommendation)
-6. Configure runtime settings and environment variables
-7. Validate required permissions
-8. Deploy function code with retry logic (cloud-aware Kudu URL)
-9. Restart the function app
+6. Configure runtime settings and environment variables (Flex skips classic `FUNCTIONS_WORKER_RUNTIME*` / `WEBSITE_RUN_FROM_PACKAGE`)
+7. Deploy function code (Kudu VFS for Classic; OneDeploy `/api/publish?type=zip` or Azure CLI for Flex)
+8. Restart the function app
+9. Verify `EventHubTrigger` is registered and required app settings exist (retries; can take ~2 minutes on Basic/Gov)
 
 > **Note:** Enabling the system-assigned identity clears the Defender recommendation. Event Hub access still uses `EVENTHUB_CONNECTION` until a later managed-identity auth migration.
 
 ### Deployment Validation
 The script performs several validation steps:
 1. Resource group existence
-2. Storage account naming
-3. Required permissions
-4. Function runtime compatibility
-5. File deployment success
+2. Storage account naming / cloud endpoint suffix
+3. Classic vs Flex plan/app compatibility (fails loudly on mismatches)
+4. Function code deploy success (Kudu or OneDeploy)
+5. Post-deploy: `EventHubTrigger` listed and `EVENTHUB_CONNECTION` / `EVENT_HUB_NAME` / related settings present
 
 ## Architecture
 
@@ -227,7 +256,10 @@ Monitor the function using:
 |-------|---------------|----------|
 | Connection timeout | Syslog server unreachable | Check network connectivity, firewall rules |
 | SSL handshake failure | Certificate issues | Verify syslog server certificate |
-| Messages not arriving | Event Hub binding issue | Check EVENTHUB_CONNECTION string |
+| Messages not arriving | Event Hub binding issue | Check `EVENTHUB_CONNECTION` and `EVENT_HUB_NAME`; confirm `EventHubTrigger` is registered |
+| Deploy: no functions registered | Host still indexing, or list API lag (esp. Basic/Gov) | Re-run with updated script (retries); check Kudu `wwwroot/EventHubTrigger` and that Classic plan is Windows |
+| Flex deploy in Gov | Flex not available in Azure Government | Use Classic (`-HostingPlan Classic` or omit) |
+| Classic deploy hits Flex plan/app | Wrong hosting mode for existing resources | Use a new app/plan name for Classic, or pass `-HostingPlan FlexConsumption` |
 | Function timeout | Too many messages | Increase timeout or reduce batch size |
 
 ### Troubleshooting Steps
