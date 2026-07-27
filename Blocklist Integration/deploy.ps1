@@ -37,12 +37,23 @@ param(
     [Parameter(Mandatory = $false)]
     [string]$ArmEndpoint,
 
-    # App Service Plan Parameters (OPTIONAL - will create Basic B1 plan if not provided)
+    # App Service Plan Parameters (OPTIONAL - Classic: creates Basic B1 if omitted; Flex: names the Flex plan)
     [Parameter(Mandatory = $false)]
     [string]$AppServicePlanName,
 
     [Parameter(Mandatory = $false)]
-    [string]$AppServicePlanResourceGroup
+    [string]$AppServicePlanResourceGroup,
+
+    # Classic = existing Windows B1/Consumption/Premium flow (default, backwards compatible).
+    # FlexConsumption = create Linux Flex Function App (one app per plan; not an in-place migrate).
+    [Parameter(Mandatory = $false)]
+    [ValidateSet("Classic", "FlexConsumption")]
+    [string]$HostingPlan = "Classic",
+
+    # Used only when HostingPlan is FlexConsumption (512, 2048, or 4096)
+    [Parameter(Mandatory = $false)]
+    [ValidateSet(512, 2048, 4096)]
+    [int]$FlexInstanceMemoryMB = 2048
 )
 
 # Helper function to get publishing credentials
@@ -81,12 +92,142 @@ function Get-ValidStorageAccountName {
     return $name
 }
 
+# Flex-safe app settings update (Update-AzFunctionAppSetting is unreliable on Flex)
+function Set-FunctionAppSettingsViaArm {
+    param(
+        [string]$ResourceGroupName,
+        [string]$FunctionAppName,
+        [hashtable]$Settings
+    )
+
+    $site = Get-AzResource -ResourceGroupName $ResourceGroupName -ResourceName $FunctionAppName -ResourceType "Microsoft.Web/sites" -ErrorAction Stop
+    $listResult = Invoke-AzRestMethod -Path "$($site.ResourceId)/config/appsettings/list?api-version=2023-12-01" -Method POST -ErrorAction Stop
+    $props = @{}
+    if ($listResult.Content) {
+        $parsed = $listResult.Content | ConvertFrom-Json
+        if ($parsed.properties) {
+            $parsed.properties.PSObject.Properties | ForEach-Object {
+                $props[$_.Name] = [string]$_.Value
+            }
+        }
+    }
+    foreach ($key in $Settings.Keys) {
+        $props[$key] = [string]$Settings[$key]
+    }
+
+    $payload = @{ properties = $props } | ConvertTo-Json -Depth 10 -Compress
+    $putResult = Invoke-AzRestMethod -Path "$($site.ResourceId)/config/appsettings?api-version=2023-12-01" -Method PUT -Payload $payload -ErrorAction Stop
+    if ($putResult.StatusCode -notin 200, 201, 202) {
+        throw "Failed to update app settings via ARM (status $($putResult.StatusCode)): $($putResult.Content)"
+    }
+}
+
+# Post-deploy verification for blocklist function (Classic + Flex)
+function Assert-BlocklistDeployment {
+    param(
+        [string]$ResourceGroupName,
+        [string]$FunctionAppName,
+        [string]$ExpectedFunctionName = "blocklist",
+        [int]$MaxAttempts = 8,
+        [int]$RetryDelaySeconds = 15
+    )
+
+    Write-Host "Verifying deployed functions..."
+    $site = Get-AzResource -ResourceGroupName $ResourceGroupName -ResourceName $FunctionAppName -ResourceType "Microsoft.Web/sites" -ErrorAction Stop
+
+    $apiVersions = @("2022-03-01", "2023-01-01", "2023-12-01")
+    $functionNames = @()
+    $lastListDetail = "no list attempts yet"
+
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        try {
+            Invoke-AzResourceAction -ResourceGroupName $ResourceGroupName `
+                -ResourceType "Microsoft.Web/sites" `
+                -ResourceName $FunctionAppName `
+                -Action "syncfunctiontriggers" `
+                -Force -ErrorAction Stop | Out-Null
+            Write-Host "Synced function triggers (attempt $attempt/$MaxAttempts)" -ForegroundColor Gray
+        }
+        catch {
+            Write-Host "Warning: syncfunctiontriggers failed (attempt $attempt): $_" -ForegroundColor Yellow
+        }
+
+        $functionNames = @()
+        foreach ($apiVersion in $apiVersions) {
+            try {
+                $functionsResult = Invoke-AzRestMethod -Path "$($site.ResourceId)/functions?api-version=$apiVersion" -Method GET -ErrorAction Stop
+                $statusCode = [int]$functionsResult.StatusCode
+                $lastListDetail = "api-version=$apiVersion status=$statusCode"
+
+                if ($statusCode -lt 200 -or $statusCode -ge 300) {
+                    Write-Host "Functions list returned $statusCode for api-version $apiVersion" -ForegroundColor Yellow
+                    continue
+                }
+
+                if ($functionsResult.Content) {
+                    $functionsJson = $functionsResult.Content | ConvertFrom-Json
+                    if ($functionsJson.value) {
+                        $functionNames = @($functionsJson.value | ForEach-Object {
+                            if ($_.name -match '/') { ($_.name -split '/')[-1] } else { $_.name }
+                        })
+                    }
+                    elseif ($functionsJson.name) {
+                        $n = $functionsJson.name
+                        $functionNames = @($(if ($n -match '/') { ($n -split '/')[-1] } else { $n }))
+                    }
+                }
+
+                Write-Host "Functions list ($lastListDetail): found $($functionNames.Count) function(s)" -ForegroundColor Gray
+                if ($functionNames.Count -gt 0) { break }
+            }
+            catch {
+                $lastListDetail = "api-version=$apiVersion error=$_"
+                Write-Host "Functions list failed ($lastListDetail)" -ForegroundColor Yellow
+            }
+        }
+
+        if ($functionNames.Count -gt 0 -and ($functionNames | Where-Object { $_ -eq $ExpectedFunctionName -or $_ -like "*$ExpectedFunctionName" })) {
+            break
+        }
+
+        if ($attempt -lt $MaxAttempts) {
+            Write-Host "Function '$ExpectedFunctionName' not registered yet (attempt $attempt/$MaxAttempts; $lastListDetail). Waiting ${RetryDelaySeconds}s..." -ForegroundColor Yellow
+            Start-Sleep -Seconds $RetryDelaySeconds
+        }
+    }
+
+    if ($functionNames.Count -eq 0) {
+        throw "No functions registered after deploy (after $MaxAttempts attempts). Expected '$ExpectedFunctionName'. Last list result: $lastListDetail. Check Kudu wwwroot and host logs."
+    }
+
+    Write-Host "Registered functions: $($functionNames -join ', ')" -ForegroundColor Green
+    if (-not ($functionNames | Where-Object { $_ -eq $ExpectedFunctionName -or $_ -like "*$ExpectedFunctionName" })) {
+        throw "Function '$ExpectedFunctionName' was not found among registered functions: $($functionNames -join ', ')"
+    }
+}
+
 # Error handling
 $ErrorActionPreference = 'Stop'
 
 # Set default App Service Plan Resource Group if not specified
 if (-not $AppServicePlanResourceGroup) {
     $AppServicePlanResourceGroup = $ResourceGroupName
+}
+
+$isFlexConsumption = ($HostingPlan -eq "FlexConsumption")
+if ($isFlexConsumption -and $AzureCloud -eq "AzureUSGovernment") {
+    throw "Flex Consumption is not currently available in Azure Government. Use -HostingPlan Classic with -AzureCloud AzureUSGovernment."
+}
+
+if ($isFlexConsumption) {
+    Write-Host "Hosting plan: Flex Consumption (Linux, PowerShell 7.4)" -ForegroundColor Cyan
+    if (-not $AppServicePlanName) {
+        $AppServicePlanName = "$FunctionAppName-plan"
+        $AppServicePlanResourceGroup = $ResourceGroupName
+    }
+}
+else {
+    Write-Host "Hosting plan: Classic (default Basic / existing ASP)"
 }
 
 # Determine storage endpoint suffix based on cloud environment
@@ -182,8 +323,45 @@ $appInsightsInstrumentationKey = if ($appInsights.InstrumentationKey) {
 
 Write-Host "Application Insights configured successfully" -ForegroundColor Green
 
-# Create or verify App Service Plan
-if (-not $AppServicePlanName) {
+# Create or verify hosting plan
+if ($isFlexConsumption) {
+    Write-Host "Creating or verifying Flex Consumption plan: $AppServicePlanName"
+    $appServicePlan = Get-AzAppServicePlan -ResourceGroupName $AppServicePlanResourceGroup -Name $AppServicePlanName -ErrorAction SilentlyContinue
+
+    if ($appServicePlan -and $appServicePlan.Sku.Tier -ne "FlexConsumption") {
+        throw "App Service Plan '$AppServicePlanName' exists but is SKU '$($appServicePlan.Sku.Tier)', not FlexConsumption. Use a new plan name or HostingPlan Classic."
+    }
+
+    if (-not $appServicePlan) {
+        Write-Host "Creating Flex Consumption plan (FC1, Linux) via ARM..."
+        $planProperties = @{
+            reserved = $true  # Linux required for Flex
+        }
+        $planSku = @{
+            name     = "FC1"
+            tier     = "FlexConsumption"
+            family   = "FC"
+            capacity = 0
+        }
+        New-AzResource `
+            -ResourceGroupName $AppServicePlanResourceGroup `
+            -ResourceType "Microsoft.Web/serverfarms" `
+            -ResourceName $AppServicePlanName `
+            -Location $Location `
+            -Kind "functionapp" `
+            -Properties $planProperties `
+            -Sku $planSku `
+            -Force `
+            -ErrorAction Stop | Out-Null
+
+        $appServicePlan = Get-AzAppServicePlan -ResourceGroupName $AppServicePlanResourceGroup -Name $AppServicePlanName
+        Write-Host "Created Flex Consumption plan: $AppServicePlanName" -ForegroundColor Green
+    }
+    else {
+        Write-Host "Using existing Flex Consumption plan: $AppServicePlanName"
+    }
+}
+elseif (-not $AppServicePlanName) {
     # Generate default plan name from function app name
     $AppServicePlanName = "$FunctionAppName-plan"
     $AppServicePlanResourceGroup = $ResourceGroupName
@@ -205,6 +383,8 @@ if (-not $AppServicePlanName) {
             Write-Host "Deleting and recreating with Consumption (Y1) plan..." -ForegroundColor Yellow
             Remove-AzAppServicePlan -ResourceGroupName $AppServicePlanResourceGroup -Name $AppServicePlanName -Force
             $needsCreation = $true
+        } elseif ($existingSku -eq "FlexConsumption") {
+            throw "App Service Plan '$AppServicePlanName' is Flex Consumption, but -HostingPlan is Classic. Use a different plan name for Classic, or pass -HostingPlan FlexConsumption."
         } else {
             Write-Host "Using existing plan: $AppServicePlanName (SKU: $existingSku)"
         }
@@ -250,6 +430,10 @@ if (-not $AppServicePlanName) {
     if (-not $appServicePlan) {
         throw "App Service Plan '$AppServicePlanName' not found in resource group '$AppServicePlanResourceGroup'. Please create the App Service Plan first or specify an existing plan."
     }
+
+    if ($appServicePlan.Sku.Tier -eq "FlexConsumption") {
+        throw "App Service Plan '$AppServicePlanName' is Flex Consumption, but -HostingPlan is Classic. Pass -HostingPlan FlexConsumption, or choose a Classic plan."
+    }
 }
 
 Write-Host "  Plan Name: $AppServicePlanName"
@@ -266,9 +450,30 @@ $existingApp = Get-AzFunctionApp -Name $FunctionAppName -ResourceGroupName $Reso
 
 if ($existingApp) {
     Write-Host "Function App already exists. Updating configuration..."
-    $functionApp = Update-AzFunctionApp `
-        -ResourceGroupName $ResourceGroupName `
-        -Name $FunctionAppName
+    $existingPlanId = $existingApp.ServerFarmId
+    $existingTier = $null
+    if ($existingPlanId) {
+        $existingPlanResource = Get-AzResource -ResourceId $existingPlanId -ErrorAction SilentlyContinue
+        if ($existingPlanResource -and $existingPlanResource.Sku) {
+            $existingTier = $existingPlanResource.Sku.Tier
+        }
+    }
+
+    if (-not $isFlexConsumption -and $existingTier -eq "FlexConsumption") {
+        throw "Function App '$FunctionAppName' is on a Flex Consumption plan, but -HostingPlan is Classic. Use -HostingPlan FlexConsumption, or create a new Function App name for Classic."
+    }
+    if ($isFlexConsumption -and $existingTier -and $existingTier -ne "FlexConsumption") {
+        throw "Function App '$FunctionAppName' already exists on a non-Flex plan ($existingTier). Azure does not support in-place migration to Flex Consumption. Create a new Function App name with -HostingPlan FlexConsumption."
+    }
+
+    if ($isFlexConsumption) {
+        Write-Host "Existing Flex Function App - skipping Update-AzFunctionApp (unsupported on Flex)"
+    }
+    else {
+        $functionApp = Update-AzFunctionApp `
+            -ResourceGroupName $ResourceGroupName `
+            -Name $FunctionAppName
+    }
 } else {
     Write-Host "Creating new Function App..."
     Write-Host "  Name: $FunctionAppName"
@@ -276,22 +481,36 @@ if ($existingApp) {
     Write-Host "  Storage: $StorageAccountName"
     Write-Host "  Runtime: PowerShell 7.4"
 
-    # Check if plan is Flex Consumption (requires special handling)
-    if ($appServicePlan.Sku.Tier -eq "FlexConsumption") {
-        Write-Host "Detected Flex Consumption plan - using ARM template deployment..." -ForegroundColor Yellow
-        Write-Host "Note: Flex Consumption plans require Linux hosting and instance memory configuration" -ForegroundColor Yellow
+    $storageConnectionString = "DefaultEndpointsProtocol=https;AccountName=$StorageAccountName;AccountKey=$((Get-AzStorageAccountKey -ResourceGroupName $ResourceGroupName -Name $StorageAccountName)[0].Value);EndpointSuffix=$storageEndpointSuffix"
 
-        # Flex Consumption requires ARM template or REST API deployment with functionAppConfig
-        # Using New-AzResource for direct ARM deployment
-        # Note: Flex Consumption does NOT allow FUNCTIONS_WORKER_RUNTIME* in siteConfig.appSettings
-        # Runtime settings go in functionAppConfig.runtime instead
+    if ($isFlexConsumption) {
+        Write-Host "Creating Flex Consumption Function App (Linux) via ARM..." -ForegroundColor Yellow
+
+        try {
+            $storageCtx = $storageAccount.Context
+            if (-not $storageCtx) {
+                $storageCtx = (Get-AzStorageAccount -ResourceGroupName $ResourceGroupName -Name $StorageAccountName).Context
+            }
+            $deployContainer = Get-AzStorageContainer -Name "deployments" -Context $storageCtx -ErrorAction SilentlyContinue
+            if (-not $deployContainer) {
+                New-AzStorageContainer -Name "deployments" -Context $storageCtx -Permission Off | Out-Null
+                Write-Host "Created deployments blob container" -ForegroundColor Green
+            }
+        }
+        catch {
+            Write-Host "Warning: Could not ensure deployments container exists: $_" -ForegroundColor Yellow
+        }
+
         $functionAppProperties = @{
             serverFarmId = $appServicePlan.Id
-            siteConfig = @{
+            reserved     = $true
+            httpsOnly    = $true
+            siteConfig   = @{
                 appSettings = @(
-                    @{ name = "AzureWebJobsStorage"; value = "DefaultEndpointsProtocol=https;AccountName=$StorageAccountName;AccountKey=$((Get-AzStorageAccountKey -ResourceGroupName $ResourceGroupName -Name $StorageAccountName)[0].Value);EndpointSuffix=$storageEndpointSuffix" }
+                    @{ name = "AzureWebJobsStorage"; value = $storageConnectionString }
                     @{ name = "APPLICATIONINSIGHTS_CONNECTION_STRING"; value = $appInsightsConnectionString }
                     @{ name = "APPINSIGHTS_INSTRUMENTATIONKEY"; value = $appInsightsInstrumentationKey }
+                    @{ name = "FUNCTIONS_EXTENSION_VERSION"; value = "~4" }
                 )
             }
             functionAppConfig = @{
@@ -307,17 +526,16 @@ if ($existingApp) {
                 }
                 scaleAndConcurrency = @{
                     maximumInstanceCount = 100
-                    instanceMemoryMB = 2048
+                    instanceMemoryMB     = $FlexInstanceMemoryMB
                 }
                 runtime = @{
-                    name = "powershell"
+                    name    = "powershell"
                     version = "7.4"
                 }
             }
         }
 
         try {
-            Write-Host "Creating Flex Consumption Function App via ARM..."
             $functionApp = New-AzResource `
                 -ResourceGroupName $ResourceGroupName `
                 -ResourceType "Microsoft.Web/sites" `
@@ -328,36 +546,12 @@ if ($existingApp) {
                 -Force
 
             Write-Host "Function App created successfully with Flex Consumption plan" -ForegroundColor Green
-
-            # Get the created function app
             Start-Sleep -Seconds 10
             $functionApp = Get-AzFunctionApp -Name $FunctionAppName -ResourceGroupName $ResourceGroupName
         }
         catch {
-            Write-Host "ARM deployment failed, attempting alternative method..." -ForegroundColor Yellow
-            Write-Host "Error: $_" -ForegroundColor Yellow
-
-            # Fallback: Try using Az.Functions module which may have been updated
-            try {
-                $functionApp = New-AzFunctionApp `
-                    -ResourceGroupName $ResourceGroupName `
-                    -Name $FunctionAppName `
-                    -StorageAccountName $StorageAccountName `
-                    -PlanName $AppServicePlanName `
-                    -Runtime "PowerShell" `
-                    -RuntimeVersion "7.4" `
-                    -FunctionsVersion "4" `
-                    -OSType "Linux" `
-                    -ApplicationInsightsKey $appInsightsInstrumentationKey `
-                    -ErrorAction Stop
-
-                Write-Host "Function App created successfully using Az.Functions module" -ForegroundColor Green
-            }
-            catch {
-                Write-Host "Both ARM and Az.Functions methods failed for Flex Consumption" -ForegroundColor Red
-                Write-Host "Error: $_" -ForegroundColor Red
-                throw "Unable to create Function App on Flex Consumption plan. This may require manual creation in the Azure Portal or using the latest Azure CLI version."
-            }
+            Write-Host "Error creating Flex Consumption Function App: $_" -ForegroundColor Red
+            throw
         }
     }
     else {
@@ -369,13 +563,11 @@ if ($existingApp) {
             if ($isConsumption) {
                 Write-Host "Detected Consumption plan (Y1) - using ARM deployment..." -ForegroundColor Yellow
 
-                # Consumption plans have issues with New-AzFunctionApp trying to set AlwaysOn
-                # Use ARM API like we do for Flex Consumption, but for Windows
                 $functionAppProperties = @{
                     serverFarmId = $appServicePlan.Id
                     siteConfig = @{
                         appSettings = @(
-                            @{ name = "AzureWebJobsStorage"; value = "DefaultEndpointsProtocol=https;AccountName=$StorageAccountName;AccountKey=$((Get-AzStorageAccountKey -ResourceGroupName $ResourceGroupName -Name $StorageAccountName)[0].Value);EndpointSuffix=$storageEndpointSuffix" }
+                            @{ name = "AzureWebJobsStorage"; value = $storageConnectionString }
                             @{ name = "FUNCTIONS_WORKER_RUNTIME"; value = "powershell" }
                             @{ name = "FUNCTIONS_WORKER_RUNTIME_VERSION"; value = "7.4" }
                             @{ name = "FUNCTIONS_EXTENSION_VERSION"; value = "~4" }
@@ -479,35 +671,72 @@ if ($elapsed -ge $maxWaitTime) {
 }
 
 # Enable system-assigned managed identity (Defender for Cloud recommendation)
+# Update-AzFunctionApp does not support Flex Consumption — use ARM/REST for Flex.
 Write-Host "Enabling system-assigned managed identity..."
 try {
-    $identityParams = @{
-        Name              = $FunctionAppName
-        ResourceGroupName = $ResourceGroupName
-        Force             = $true
-        ErrorAction       = "Stop"
-    }
-    $updateCmd = Get-Command Update-AzFunctionApp -ErrorAction Stop
-    if ($updateCmd.Parameters.ContainsKey("EnableSystemAssignedIdentity")) {
-        Update-AzFunctionApp @identityParams -EnableSystemAssignedIdentity $true
-    }
-    elseif ($updateCmd.Parameters.ContainsKey("IdentityType")) {
-        Update-AzFunctionApp @identityParams -IdentityType SystemAssigned
+    $principalId = $null
+
+    if ($isFlexConsumption) {
+        Write-Host "Flex Consumption detected - enabling identity via ARM REST..."
+        $siteResource = Get-AzResource -ResourceGroupName $ResourceGroupName -ResourceName $FunctionAppName -ResourceType "Microsoft.Web/sites" -ErrorAction Stop
+
+        # Update-AzFunctionApp / New-AzResource -IdentityType are unsupported on Flex or older Az modules.
+        # PATCH identity via ARM REST (works across module versions).
+        $payload = @{ identity = @{ type = "SystemAssigned" } } | ConvertTo-Json -Compress
+        $restResult = Invoke-AzRestMethod -Path "$($siteResource.ResourceId)?api-version=2023-12-01" -Method PATCH -Payload $payload -ErrorAction Stop
+        if ($restResult.StatusCode -notin 200, 201, 202) {
+            throw "ARM identity PATCH failed with status $($restResult.StatusCode): $($restResult.Content)"
+        }
+
+        # Re-read identity principal id
+        Start-Sleep -Seconds 5
+        $siteResource = Get-AzResource -ResourceGroupName $ResourceGroupName -ResourceName $FunctionAppName -ResourceType "Microsoft.Web/sites" -ExpandProperties -ErrorAction SilentlyContinue
+        if ($siteResource.Identity -and $siteResource.Identity.PrincipalId) {
+            $principalId = $siteResource.Identity.PrincipalId
+        }
+        elseif ($siteResource.Properties.identity -and $siteResource.Properties.identity.principalId) {
+            $principalId = $siteResource.Properties.identity.principalId
+        }
+        else {
+            # Parse from REST GET as fallback
+            $getResult = Invoke-AzRestMethod -Path "$($siteResource.ResourceId)?api-version=2023-12-01" -Method GET -ErrorAction SilentlyContinue
+            if ($getResult -and $getResult.Content) {
+                $siteJson = $getResult.Content | ConvertFrom-Json
+                if ($siteJson.identity -and $siteJson.identity.principalId) {
+                    $principalId = $siteJson.identity.principalId
+                }
+            }
+        }
     }
     else {
-        Set-AzWebApp -ResourceGroupName $ResourceGroupName -Name $FunctionAppName -AssignIdentity $true -ErrorAction Stop | Out-Null
+        $identityParams = @{
+            Name              = $FunctionAppName
+            ResourceGroupName = $ResourceGroupName
+            Force             = $true
+            ErrorAction       = "Stop"
+        }
+        $updateCmd = Get-Command Update-AzFunctionApp -ErrorAction Stop
+        if ($updateCmd.Parameters.ContainsKey("EnableSystemAssignedIdentity")) {
+            Update-AzFunctionApp @identityParams -EnableSystemAssignedIdentity $true
+        }
+        elseif ($updateCmd.Parameters.ContainsKey("IdentityType")) {
+            Update-AzFunctionApp @identityParams -IdentityType SystemAssigned
+        }
+        else {
+            Set-AzWebApp -ResourceGroupName $ResourceGroupName -Name $FunctionAppName -AssignIdentity $true -ErrorAction Stop | Out-Null
+        }
+
+        $identityApp = Get-AzFunctionApp -Name $FunctionAppName -ResourceGroupName $ResourceGroupName -ErrorAction SilentlyContinue
+        if ($identityApp) {
+            if ($identityApp.PSObject.Properties["IdentityPrincipalId"]) {
+                $principalId = $identityApp.IdentityPrincipalId
+            }
+            elseif ($identityApp.Identity -and $identityApp.Identity.PrincipalId) {
+                $principalId = $identityApp.Identity.PrincipalId
+            }
+        }
     }
 
-    $identityApp = Get-AzFunctionApp -Name $FunctionAppName -ResourceGroupName $ResourceGroupName -ErrorAction SilentlyContinue
-    $principalId = $null
-    if ($identityApp) {
-        if ($identityApp.PSObject.Properties["IdentityPrincipalId"]) {
-            $principalId = $identityApp.IdentityPrincipalId
-        }
-        elseif ($identityApp.Identity -and $identityApp.Identity.PrincipalId) {
-            $principalId = $identityApp.Identity.PrincipalId
-        }
-    }
     if ($principalId) {
         Write-Host "System-assigned managed identity enabled (PrincipalId: $principalId)" -ForegroundColor Green
     }
@@ -520,43 +749,51 @@ catch {
     Write-Host "Enable it manually: Function App > Identity > System assigned > On" -ForegroundColor Yellow
 }
 
-# Configure runtime versions with retry logic
+# Configure runtime versions with retry logic (Classic only — Flex uses functionAppConfig + ARM settings)
 Write-Host "Configuring runtime versions..."
-$runtimeSettings = @{
-    "FUNCTIONS_WORKER_RUNTIME" = "powershell"
-    "FUNCTIONS_WORKER_RUNTIME_VERSION" = "7.4"
-    "FUNCTIONS_EXTENSION_VERSION" = "~4"
-    "WEBSITE_RUN_FROM_PACKAGE" = "0"  # Enable in-portal editing
-    "WEBSITE_HTTPSONLY" = "1"  # Force HTTPS
-}
-
-$retryCount = 0
-$maxRetries = 5
-while ($retryCount -lt $maxRetries) {
-    try {
-        Update-AzFunctionAppSetting -Name $FunctionAppName -ResourceGroupName $ResourceGroupName -AppSetting $runtimeSettings -ErrorAction Stop
-        Write-Host "Runtime versions configured successfully" -ForegroundColor Green
-        break
+if (-not $isFlexConsumption) {
+    $runtimeSettings = @{
+        "FUNCTIONS_WORKER_RUNTIME"         = "powershell"
+        "FUNCTIONS_WORKER_RUNTIME_VERSION" = "7.4"
+        "FUNCTIONS_EXTENSION_VERSION"      = "~4"
+        "WEBSITE_RUN_FROM_PACKAGE"         = "0"  # Enable in-portal editing
+        "WEBSITE_HTTPSONLY"               = "1"  # Force HTTPS
     }
-    catch {
-        $retryCount++
-        if ($retryCount -lt $maxRetries) {
-            Write-Host "Failed to update settings (attempt $retryCount of $maxRetries). Retrying in 15 seconds..." -ForegroundColor Yellow
-            Start-Sleep -Seconds 15
+
+    $retryCount = 0
+    $maxRetries = 5
+    while ($retryCount -lt $maxRetries) {
+        try {
+            Update-AzFunctionAppSetting -Name $FunctionAppName -ResourceGroupName $ResourceGroupName -AppSetting $runtimeSettings -ErrorAction Stop
+            Write-Host "Runtime versions configured successfully" -ForegroundColor Green
+            break
         }
-        else {
-            Write-Host "Warning: Could not configure runtime settings after $maxRetries attempts. Continuing..." -ForegroundColor Yellow
+        catch {
+            $retryCount++
+            if ($retryCount -lt $maxRetries) {
+                Write-Host "Failed to update settings (attempt $retryCount of $maxRetries). Retrying in 15 seconds..." -ForegroundColor Yellow
+                Start-Sleep -Seconds 15
+            }
+            else {
+                Write-Host "Warning: Could not configure runtime settings after $maxRetries attempts. Continuing..." -ForegroundColor Yellow
+            }
         }
     }
-}
 
-# Additional wait for Kudu/SCM site to be ready
-Write-Host "Waiting additional 30 seconds for Kudu/SCM site to be ready..."
-Start-Sleep -Seconds 30
+    # Additional wait for Kudu/SCM site to be ready
+    Write-Host "Waiting additional 30 seconds for Kudu/SCM site to be ready..."
+    Start-Sleep -Seconds 30
+}
+else {
+    Write-Host "Flex Consumption - runtime configured via functionAppConfig; skipping Classic runtime app settings" -ForegroundColor Yellow
+    Start-Sleep -Seconds 10
+}
 
 # Configure all environment variables
 Write-Host "Configuring environment variables..."
+$storageConnectionString = "DefaultEndpointsProtocol=https;AccountName=$StorageAccountName;AccountKey=$((Get-AzStorageAccountKey -ResourceGroupName $ResourceGroupName -Name $StorageAccountName)[0].Value);EndpointSuffix=$storageEndpointSuffix"
 $settings = @{
+    "AzureWebJobsStorage" = $storageConnectionString
     "SUBSCRIPTION_ID" = $subscriptionId
     "RESOURCE_GROUP" = $ResourceGroupName
     "POLICY_NAME" = $FirewallPolicyName
@@ -571,13 +808,21 @@ $settings = @{
     "APPINSIGHTS_INSTRUMENTATIONKEY" = $appInsightsInstrumentationKey
     "AZURE_CLOUD" = $AzureCloud
     "AZURE_CLOUD_ENVIRONMENT" = $AzureCloud
+    "FUNCTIONS_EXTENSION_VERSION" = "~4"
 }
 
 # Add sovereign overrides if provided
 if ($AuthorityHost) { $settings["AZURE_AUTHORITY_HOST"] = $AuthorityHost }
 if ($ArmEndpoint) { $settings["AZURE_ARM_ENDPOINT"] = $ArmEndpoint }
 
-Update-AzFunctionAppSetting -Name $FunctionAppName -ResourceGroupName $ResourceGroupName -AppSetting $settings
+if ($isFlexConsumption) {
+    Write-Host "Applying app settings via ARM (Flex-safe)..."
+    Set-FunctionAppSettingsViaArm -ResourceGroupName $ResourceGroupName -FunctionAppName $FunctionAppName -Settings $settings
+    Write-Host "App settings applied via ARM" -ForegroundColor Green
+}
+else {
+    Update-AzFunctionAppSetting -Name $FunctionAppName -ResourceGroupName $ResourceGroupName -AppSetting $settings
+}
 
 # Deploy function code
 Write-Host "Deploying function code..."
@@ -593,44 +838,115 @@ try {
     $srcPath = Join-Path $scriptPath "src"
     Write-Host "Source path: $srcPath"
 
-    # Check if this is a Flex Consumption app (requires zip deployment)
-    $isFlexConsumption = $appServicePlan.Sku.Tier -eq "FlexConsumption"
-
     if ($isFlexConsumption) {
-        Write-Host "Flex Consumption plan detected - using zip deployment..." -ForegroundColor Yellow
+        # Flex only supports OneDeploy (not Publish-AzWebApp / classic zipdeploy)
+        Write-Host "Flex Consumption - using OneDeploy (/api/publish?type=zip)..." -ForegroundColor Yellow
 
-        # Create a temporary directory for the deployment package
         $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) "funcapp-$(Get-Random)"
         New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
 
-        # Create the function structure
         $funcDir = Join-Path $tempDir "blocklist"
         New-Item -ItemType Directory -Path $funcDir -Force | Out-Null
 
-        # Copy function files
         Copy-Item -Path (Join-Path $srcPath "function.json") -Destination $funcDir
         Copy-Item -Path (Join-Path $srcPath "run.ps1") -Destination $funcDir
         Copy-Item -Path (Join-Path $srcPath "host.json") -Destination $tempDir
-
-        # Create zip file
-        $zipPath = Join-Path ([System.IO.Path]::GetTempPath()) "funcapp-$(Get-Random).zip"
-        Write-Host "Creating deployment package: $zipPath"
-
-        if (Get-Command Compress-Archive -ErrorAction SilentlyContinue) {
-            Compress-Archive -Path "$tempDir\*" -DestinationPath $zipPath -Force
-        } else {
-            throw "Compress-Archive cmdlet not available. Cannot create deployment package."
+        $requirementsPath = Join-Path $srcPath "requirements.psd1"
+        if (Test-Path $requirementsPath) {
+            Copy-Item -Path $requirementsPath -Destination $tempDir
         }
 
-        # Deploy using zip deployment
-        Write-Host "Deploying function app package..."
-        Publish-AzWebApp -ResourceGroupName $ResourceGroupName -Name $FunctionAppName -ArchivePath $zipPath -Force
+        $zipPath = Join-Path ([System.IO.Path]::GetTempPath()) "funcapp-$(Get-Random).zip"
+        if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+        Write-Host "Creating deployment package: $zipPath"
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [System.IO.Compression.ZipFile]::CreateFromDirectory($tempDir, $zipPath, [System.IO.Compression.CompressionLevel]::Optimal, $false)
 
-        # Cleanup
+        try {
+            $functionAppDetails = Get-AzFunctionApp -Name $FunctionAppName -ResourceGroupName $ResourceGroupName -ErrorAction Stop
+            $defaultHost = $functionAppDetails.DefaultHostName
+        }
+        catch {
+            $defaultHost = $null
+        }
+
+        if ($defaultHost) {
+            $kuduHost = ($defaultHost -replace '(^[^\.]+)\.', '$1.scm.')
+        }
+        else {
+            $kuduHost = "$FunctionAppName.scm.azurewebsites.net"
+        }
+
+        $siteResource = Get-AzResource -ResourceGroupName $ResourceGroupName -ResourceName $FunctionAppName -ResourceType "Microsoft.Web/sites" -ErrorAction Stop
+        try {
+            $scmPolicyPayload = @{ properties = @{ allow = $true } } | ConvertTo-Json -Compress
+            Invoke-AzRestMethod -Path "$($siteResource.ResourceId)/basicPublishingCredentialsPolicies/scm?api-version=2023-12-01" `
+                -Method PUT -Payload $scmPolicyPayload -ErrorAction SilentlyContinue | Out-Null
+        }
+        catch {
+            Write-Host "Warning: Could not enable SCM basic auth policy: $_" -ForegroundColor Yellow
+        }
+
+        $publishUrl = "https://$kuduHost/api/publish?type=zip&remoteBuild=false"
+        Write-Host "Deploying package via OneDeploy: $publishUrl"
+
+        $deployed = $false
+
+        if (Get-Command az -ErrorAction SilentlyContinue) {
+            try {
+                Write-Host "Attempting Azure CLI config-zip deploy..."
+                az functionapp deployment source config-zip `
+                    --resource-group $ResourceGroupName `
+                    --name $FunctionAppName `
+                    --src $zipPath `
+                    --only-show-errors
+                if ($LASTEXITCODE -eq 0) {
+                    $deployed = $true
+                    Write-Host "Function code deployed successfully via Azure CLI" -ForegroundColor Green
+                }
+            }
+            catch {
+                Write-Host "Azure CLI deploy failed, falling back to SCM OneDeploy: $_" -ForegroundColor Yellow
+            }
+        }
+
+        if (-not $deployed) {
+            try {
+                $accessToken = Get-AzAccessTokenString
+                Write-Host "Attempting SCM OneDeploy with AAD token..."
+                Invoke-RestMethod -Uri $publishUrl `
+                    -Method POST `
+                    -Headers @{ Authorization = "Bearer $accessToken" } `
+                    -InFile $zipPath `
+                    -ContentType "application/octet-stream" `
+                    -ErrorAction Stop | Out-Null
+                $deployed = $true
+                Write-Host "Function code deployed successfully via SCM OneDeploy (AAD)" -ForegroundColor Green
+            }
+            catch {
+                Write-Host "AAD OneDeploy failed, trying basic auth: $_" -ForegroundColor Yellow
+                $publishingCredentials = Get-AzWebAppPublishingCredentials -ResourceGroupName $ResourceGroupName -Name $FunctionAppName
+                $username = $publishingCredentials.Properties.PublishingUserName
+                $password = $publishingCredentials.Properties.PublishingPassword
+                $base64Auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("${username}:${password}"))
+                Invoke-RestMethod -Uri $publishUrl `
+                    -Method POST `
+                    -Headers @{ Authorization = "Basic $base64Auth" } `
+                    -InFile $zipPath `
+                    -ContentType "application/octet-stream" `
+                    -ErrorAction Stop | Out-Null
+                $deployed = $true
+                Write-Host "Function code deployed successfully via SCM OneDeploy (basic auth)" -ForegroundColor Green
+            }
+        }
+
+        if (-not $deployed) {
+            throw "Flex OneDeploy failed with all methods."
+        }
+
         Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
 
-        Write-Host "Function code deployed successfully via zip deployment" -ForegroundColor Green
     }
     else {
         # Standard plans use Kudu VFS API
@@ -750,6 +1066,10 @@ try {
     # Restart the Function App
     Write-Host "Restarting Function App..."
     Restart-AzFunctionApp -Name $FunctionAppName -ResourceGroupName $ResourceGroupName -Force
+
+    Write-Host "Waiting 30 seconds for function host to index after restart..."
+    Start-Sleep -Seconds 30
+    Assert-BlocklistDeployment -ResourceGroupName $ResourceGroupName -FunctionAppName $FunctionAppName
 }
 catch {
     Write-Host "Error deploying function code: $_" -ForegroundColor Red
@@ -759,12 +1079,14 @@ catch {
 Write-Host "`nDeployment completed!"
 Write-Host "`nFunction App Details:"
 Write-Host "Name: $FunctionAppName"
+Write-Host "Hosting: $(if ($isFlexConsumption) { 'Flex Consumption (Linux)' } else { 'Classic' })"
 Write-Host "Application Insights: $appInsightsName"
 
 Write-Host "`nSecurity Configurations:"
 Write-Host "- HTTPS Only: Enabled"
 Write-Host "- Minimum TLS Version: 1.2"
 Write-Host "- Enforce HTTPS for blocklist URL: Enabled"
+Write-Host "- System-assigned managed identity: Enabled (attempted)"
 
 Write-Host "`nNext steps:"
 Write-Host "1. Monitor the function execution in Application Insights"

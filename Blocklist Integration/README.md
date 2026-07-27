@@ -24,6 +24,7 @@ This solution:
 - **API Access**: HTTP endpoints for testing and manual operations
 - **Secure Communications**: TLS 1.2 support with HTTPS-only connections
 - **Managed Identity**: Deploy enables a system-assigned managed identity. Runtime Azure auth still uses the service principal (`CLIENT_ID` / `CLIENT_SECRET`) until a later migration.
+- **Flex Consumption (opt-in)**: Pass `-HostingPlan FlexConsumption` to create a **new** Linux Flex Function App (PowerShell 7.4). Default remains Classic (Windows B1 / existing ASP) for backwards compatibility. Azure does not support in-place migration from Classic to Flex — use a new Function App name.
 
 ## Architecture
 
@@ -247,7 +248,27 @@ Rules are processed in this order:
     -AzureCloud AzureUSGovernment
 ```
 
-#### Scenario 4: Custom Cloud Endpoints (Advanced)
+#### Scenario 4: Flex Consumption (Linux)
+**Best for:** Secure storage / VNet scenarios. Creates a **new** Linux Flex app (not an in-place Classic migrate).
+
+```powershell
+./block/deploy.ps1 `
+    -ResourceGroupName "your-rg" `
+    -Location "eastus" `
+    -FunctionAppName "your-func-name-flex" `
+    -FirewallPolicyName "your-policy" `
+    -FirewallName "your-firewall" `
+    -TenantId "your-tenant-id" `
+    -ClientId "your-client-id" `
+    -ClientSecret "your-client-secret" `
+    -BlocklistUrl "https://your-blocklist-url" `
+    -HostingPlan FlexConsumption `
+    -FlexInstanceMemoryMB 2048
+```
+
+> Default `-HostingPlan` is `Classic` (backwards compatible). Flex is Linux-only, PowerShell 7.4, zip deploy, and one app per Flex plan.
+
+#### Scenario 5: Custom Cloud Endpoints (Advanced)
 **Use case:** Custom sovereign cloud configurations
 
 ```powershell

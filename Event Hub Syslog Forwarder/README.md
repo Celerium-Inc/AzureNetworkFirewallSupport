@@ -25,7 +25,8 @@ Azure Function that processes Azure Event Hub messages containing various log ty
   - Az.Functions
   - Az.EventHub
   - Az.ApplicationInsights
-- App Service Plan (optional - Consumption plan auto-created if not specified)
+- App Service Plan (optional for Classic - Consumption plan auto-created if not specified)
+- For Flex: pass `-HostingPlan FlexConsumption` (creates a new Linux Flex app; not an in-place migrate)
 
 ## Supported Log Types
 
@@ -160,16 +161,34 @@ Get-AzAppServicePlan | Select-Object Name, ResourceGroup, Sku
     -AzureCloud AzureUSGovernment
 ```
 
+#### Scenario 4: Flex Consumption (Linux)
+**Best for:** Secure storage / VNet scenarios. Creates a **new** Linux Flex app (not an in-place Classic migrate).
+
+```powershell
+./forward/deploy.ps1 `
+    -ResourceGroupName "your-rg" `
+    -Location "eastus" `
+    -FunctionAppName "your-func-name-flex" `
+    -SyslogServer "syslog.example.com" `
+    -SyslogPort 514 `
+    -EventHubName "your-eventhub" `
+    -EventHubConnection "your-connection-string" `
+    -Protocol "SSL" `
+    -HostingPlan FlexConsumption `
+    -FlexInstanceMemoryMB 2048
+```
+
+> Default `-HostingPlan` is `Classic` (backwards compatible). Flex is Linux-only, PowerShell 7.4, zip deploy, and one app per Flex plan.
+
 The deployment script will:
 1. Verify Azure connection and resource group (cloud-aware)
 2. Create or update storage account (auto-named from function app name)
 3. Create or update Application Insights
-4. Create or update Function App
+4. Create Classic ASP + Function App **or** Flex FC1 plan + Linux Flex Function App (when `-HostingPlan FlexConsumption`)
 5. Enable system-assigned managed identity (Defender for Cloud recommendation)
-6. Configure runtime settings and environment variables
-7. Validate required permissions
-8. Deploy function code with retry logic (cloud-aware Kudu URL)
-9. Restart the function app
+6. Configure runtime settings and environment variables (Flex skips classic `FUNCTIONS_WORKER_RUNTIME*` / `WEBSITE_RUN_FROM_PACKAGE`)
+7. Deploy function code (Kudu VFS for Classic; OneDeploy `/api/publish?type=zip` or Azure CLI for Flex)
+8. Restart the function app
 
 > **Note:** Enabling the system-assigned identity clears the Defender recommendation. Event Hub access still uses `EVENTHUB_CONNECTION` until a later managed-identity auth migration.
 
