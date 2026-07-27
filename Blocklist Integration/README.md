@@ -24,7 +24,7 @@ This solution:
 - **API Access**: HTTP endpoints for testing and manual operations
 - **Secure Communications**: TLS 1.2 support with HTTPS-only connections
 - **Managed Identity**: Deploy enables a system-assigned managed identity. Runtime Azure auth still uses the service principal (`CLIENT_ID` / `CLIENT_SECRET`) until a later migration.
-- **Flex Consumption (opt-in)**: Pass `-HostingPlan FlexConsumption` to create a **new** Linux Flex Function App (PowerShell 7.4). Default remains Classic (Windows B1 / existing ASP) for backwards compatibility. Azure does not support in-place migration from Classic to Flex — use a new Function App name.
+- **Flex Consumption (opt-in, public cloud)**: Pass `-HostingPlan FlexConsumption` to create a **new** Linux Flex Function App (PowerShell 7.4). Default remains Classic (Windows B1 / existing ASP). Not available in Azure Government. Azure does not support in-place Classic↔Flex migration — use a new Function App name. There is no silent Classic→Flex switch based on plan SKU.
 
 ## Architecture
 
@@ -110,7 +110,7 @@ The function enforces the following security settings:
 
 ### Timer Schedule
 
-The function runs on a schedule defined in the `function.json` file. By default, it runs every 15 minutes:
+The function runs on a schedule defined in the `function.json` file. By default, it runs every **10 minutes**:
 
 ```json
 {
@@ -124,7 +124,8 @@ To modify the schedule:
 3. Save the changes
 
 Common CRON expressions:
-- `0 */15 * * * *` - Every 15 minutes (default)
+- `0 */10 * * * *` - Every 10 minutes (default)
+- `0 */15 * * * *` - Every 15 minutes
 - `0 */30 * * * *` - Every 30 minutes
 - `0 0 * * * *` - Every hour
 - `0 0 */2 * * *` - Every 2 hours
@@ -180,7 +181,12 @@ Rules are processed in this order:
 
 ### Deployment Scenarios
 
-> **Note**: App Service Plan is optional. If not specified, a Basic (B1) plan will be automatically created. You can also specify an existing plan with `-AppServicePlanName`.
+> **Hosting notes**
+> - Default `-HostingPlan` is `Classic` (backwards compatible).
+> - Flex runs **only** when you pass `-HostingPlan FlexConsumption` — no silent Classic→Flex switch.
+> - Classic targeting an existing Flex app/plan (or the reverse) **throws**. Use a new Function App/plan name to change modes.
+> - App Service Plan is optional for Classic: if omitted, a Basic (B1) plan is created. Pass `-AppServicePlanName` for an existing Windows plan.
+> - `host.json` sets `managedDependency.enabled = false` (Flex-safe; no PowerShell Gallery auto-install).
 
 #### Scenario 1: Simple Deployment (Auto-creates Basic B1 Plan)
 **Best for:** Timer-triggered workloads, cost optimization
@@ -216,14 +222,14 @@ Rules are processed in this order:
     -AppServicePlanResourceGroup "plan-rg"  # Optional, defaults to same RG
 ```
 
-#### Scenario 3: Azure US Government Cloud
-**Note:** Works with auto-created Basic B1 plan or existing plans
+#### Scenario 3: Azure US Government Cloud (Classic only)
+**Note:** Flex Consumption is **not** available in Azure Government. Works with auto-created Basic B1 or an existing Windows plan.
 
 ```powershell
 # With auto-created Basic B1 plan
 ./block/deploy.ps1 `
     -ResourceGroupName "your-rg" `
-    -Location "usgovvirginia" `
+    -Location "USGov Virginia" `
     -FunctionAppName "your-func-name" `
     -FirewallPolicyName "your-policy" `
     -FirewallName "your-firewall" `
@@ -236,7 +242,7 @@ Rules are processed in this order:
 # Or with an existing plan
 ./block/deploy.ps1 `
     -ResourceGroupName "your-rg" `
-    -Location "usgovvirginia" `
+    -Location "USGov Virginia" `
     -FunctionAppName "your-func-name" `
     -FirewallPolicyName "your-policy" `
     -FirewallName "your-firewall" `
@@ -248,8 +254,8 @@ Rules are processed in this order:
     -AzureCloud AzureUSGovernment
 ```
 
-#### Scenario 4: Flex Consumption (Linux)
-**Best for:** Secure storage / VNet scenarios. Creates a **new** Linux Flex app (not an in-place Classic migrate).
+#### Scenario 4: Flex Consumption (Linux, Azure Public only)
+**Best for:** Secure storage / VNet scenarios. Creates a **new** Linux Flex app (not an in-place Classic migrate). One app per Flex plan. PowerShell 7.4 only.
 
 ```powershell
 ./block/deploy.ps1 `
@@ -266,7 +272,7 @@ Rules are processed in this order:
     -FlexInstanceMemoryMB 2048
 ```
 
-> Default `-HostingPlan` is `Classic` (backwards compatible). Flex is Linux-only, PowerShell 7.4, zip deploy, and one app per Flex plan.
+After deploy, the script restarts the app and verifies the `blocklist` function is registered (with retries).
 
 #### Scenario 5: Custom Cloud Endpoints (Advanced)
 **Use case:** Custom sovereign cloud configurations
@@ -327,6 +333,10 @@ Access logs through:
 6. **Cross-Cloud Authentication (AADSTS900382)**
    - Ensure `AZURE_CLOUD` or `AZURE_CLOUD_ENVIRONMENT`, or the `AZURE_AUTHORITY_HOST`/`AZURE_ARM_ENDPOINT` overrides are set correctly for your tenant
    - Example for US Gov: set `AZURE_CLOUD=AzureUSGovernment`
+
+7. **Flex / hosting mode errors**
+   - Flex + Azure Government: use Classic instead
+   - Classic deploy against a Flex app/plan (or vice versa): use a new Function App name or the matching `-HostingPlan`
 
 ## Performance Metrics
 

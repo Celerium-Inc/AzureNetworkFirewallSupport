@@ -17,7 +17,9 @@ This function is timer-triggered and runs automatically on a schedule defined in
 }
 ```
 
-The default schedule is every 10 minutes (`0 */10 * * * *`). This can be modified by updating the function.json file.
+The default schedule is every 10 minutes (`0 */10 * * * *`), matching `src/function.json`. This can be modified by updating the function.json file.
+
+> Deployment hosting (Classic vs Flex), managed identity, and cloud parameters are documented in [README.md](README.md). This reference covers runtime behavior only.
 
 ## Operation Details
 
