@@ -37,23 +37,24 @@ param(
     [Parameter(Mandatory = $false)]
     [string]$ArmEndpoint,
 
-    # App Service Plan Parameters (OPTIONAL - Classic: creates Basic B1 if omitted; Flex: names the Flex plan)
+    # App Service Plan Parameters (OPTIONAL - Auto infers an existing named plan; otherwise Public uses Flex and Gov uses Classic B1)
     [Parameter(Mandatory = $false)]
     [string]$AppServicePlanName,
 
     [Parameter(Mandatory = $false)]
     [string]$AppServicePlanResourceGroup,
 
-    # Classic = existing Windows B1/Consumption/Premium flow (default, backwards compatible).
+    # Auto = infer an existing named plan; otherwise FlexConsumption in Azure Public or Classic Basic B1 in Azure Government.
+    # Classic = existing Windows B1/Consumption/Premium flow.
     # FlexConsumption = create Linux Flex Function App (one app per plan; not an in-place migrate).
     [Parameter(Mandatory = $false)]
-    [ValidateSet("Classic", "FlexConsumption")]
-    [string]$HostingPlan = "Classic",
+    [ValidateSet("Auto", "Classic", "FlexConsumption")]
+    [string]$HostingPlan = "Auto",
 
     # Used only when HostingPlan is FlexConsumption (512, 2048, or 4096)
     [Parameter(Mandatory = $false)]
     [ValidateSet(512, 2048, 4096)]
-    [int]$FlexInstanceMemoryMB = 2048
+    [int]$FlexInstanceMemoryMB = 512
 )
 
 # Helper function to get publishing credentials
@@ -90,6 +91,121 @@ function Get-ValidStorageAccountName {
     }
     
     return $name
+}
+
+# Creates a Flex plan while tolerating transient ARM locks and eventual consistency.
+function New-FlexConsumptionPlanWithRetry {
+    param(
+        [string]$ResourceGroupName,
+        [string]$Name,
+        [string]$Location,
+        [int]$MaxAttempts = 6,
+        [int]$InitialDelaySeconds = 5
+    )
+
+    function Assert-FlexPlan {
+        param($Plan)
+
+        if (-not $Plan) {
+            return $null
+        }
+
+        $tier = $Plan.Sku.Tier
+        $skuName = $Plan.Sku.Name
+        if ($tier -ne "FlexConsumption" -or ($skuName -and $skuName -ne "FC1")) {
+            throw "App Service Plan '$Name' exists but is SKU '$skuName/$tier', not FC1/FlexConsumption."
+        }
+
+        return $Plan
+    }
+
+    $planProperties = @{
+        reserved = $true  # Linux required for Flex
+    }
+    $planSku = @{
+        name     = "FC1"
+        tier     = "FlexConsumption"
+        family   = "FC"
+        capacity = 0
+    }
+    $lastError = $null
+
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        $existingPlan = Get-AzAppServicePlan -ResourceGroupName $ResourceGroupName -Name $Name -ErrorAction SilentlyContinue
+        if ($existingPlan) {
+            Write-Host "Flex Consumption plan is available: $Name" -ForegroundColor Green
+            return (Assert-FlexPlan -Plan $existingPlan)
+        }
+
+        try {
+            Write-Host "Creating Flex Consumption plan (attempt $attempt/$MaxAttempts)..."
+            New-AzResource `
+                -ResourceGroupName $ResourceGroupName `
+                -ResourceType "Microsoft.Web/serverfarms" `
+                -ResourceName $Name `
+                -Location $Location `
+                -Kind "functionapp" `
+                -Properties $planProperties `
+                -Sku $planSku `
+                -Force `
+                -ErrorAction Stop | Out-Null
+        }
+        catch {
+            $lastError = $_
+
+            # A failed response can still leave a successfully created plan behind.
+            $existingPlan = Get-AzAppServicePlan -ResourceGroupName $ResourceGroupName -Name $Name -ErrorAction SilentlyContinue
+            if ($existingPlan) {
+                Write-Host "Azure created the Flex Consumption plan despite the failed create response." -ForegroundColor Yellow
+                return (Assert-FlexPlan -Plan $existingPlan)
+            }
+
+            $errorText = @(
+                $_.Exception.Message
+                $_.ErrorDetails.Message
+                ($_ | Out-String)
+            ) -join "`n"
+            $isTransientLock = $errorText -match '(?i)(\b429\b|59207|exclusive lock|too many requests|throttl)'
+            if (-not $isTransientLock) {
+                throw
+            }
+
+            if ($attempt -eq $MaxAttempts) {
+                break
+            }
+
+            $delaySeconds = [Math]::Min(
+                [int]($InitialDelaySeconds * [Math]::Pow(2, $attempt - 1)),
+                60
+            )
+            Write-Host "Azure is locking or throttling the server farm. Retrying in ${delaySeconds}s..." -ForegroundColor Yellow
+            Start-Sleep -Seconds $delaySeconds
+            continue
+        }
+
+        # New-AzResource is synchronous, but the plan can take a few seconds to appear via Get-AzAppServicePlan.
+        for ($readAttempt = 1; $readAttempt -le 6; $readAttempt++) {
+            $createdPlan = Get-AzAppServicePlan -ResourceGroupName $ResourceGroupName -Name $Name -ErrorAction SilentlyContinue
+            if ($createdPlan) {
+                return (Assert-FlexPlan -Plan $createdPlan)
+            }
+            Start-Sleep -Seconds 2
+        }
+
+        if ($attempt -lt $MaxAttempts) {
+            Write-Host "Plan create returned successfully but is not visible yet. Retrying verification..." -ForegroundColor Yellow
+        }
+    }
+
+    # Give an accepted create one final chance to become visible before failing.
+    Start-Sleep -Seconds 5
+    $existingPlan = Get-AzAppServicePlan -ResourceGroupName $ResourceGroupName -Name $Name -ErrorAction SilentlyContinue
+    if ($existingPlan) {
+        return (Assert-FlexPlan -Plan $existingPlan)
+    }
+
+    $lastDetail = if ($lastError) { $lastError.Exception.Message } else { "The plan did not become visible after creation." }
+    throw "Failed to create Flex Consumption plan '$Name' after $MaxAttempts attempts. Last error: $lastDetail"
 }
 
 # Flex-safe app settings update (Update-AzFunctionAppSetting is unreliable on Flex)
@@ -214,21 +330,7 @@ if (-not $AppServicePlanResourceGroup) {
     $AppServicePlanResourceGroup = $ResourceGroupName
 }
 
-$isFlexConsumption = ($HostingPlan -eq "FlexConsumption")
-if ($isFlexConsumption -and $AzureCloud -eq "AzureUSGovernment") {
-    throw "Flex Consumption is not currently available in Azure Government. Use -HostingPlan Classic with -AzureCloud AzureUSGovernment."
-}
-
-if ($isFlexConsumption) {
-    Write-Host "Hosting plan: Flex Consumption (Linux, PowerShell 7.4)" -ForegroundColor Cyan
-    if (-not $AppServicePlanName) {
-        $AppServicePlanName = "$FunctionAppName-plan"
-        $AppServicePlanResourceGroup = $ResourceGroupName
-    }
-}
-else {
-    Write-Host "Hosting plan: Classic (default Basic / existing ASP)"
-}
+$requestedHostingPlan = $HostingPlan
 
 # Determine storage endpoint suffix based on cloud environment
 $storageEndpointSuffix = switch ($AzureCloud) {
@@ -261,6 +363,47 @@ catch {
     Connect-AzAccount -UseDeviceAuthentication -Environment $targetAzEnv
     $context = Get-AzContext
     $subscriptionId = $context.Subscription.Id
+}
+
+# Resolve Auto after authentication so an existing named plan can determine the hosting mode.
+$autoResolution = $null
+if ($HostingPlan -eq "Auto") {
+    $existingNamedPlan = $null
+    if ($AppServicePlanName) {
+        $existingNamedPlan = @(
+            Get-AzAppServicePlan `
+                -ResourceGroupName $AppServicePlanResourceGroup `
+                -ErrorAction Stop |
+                Where-Object { $_.Name -eq $AppServicePlanName }
+        ) | Select-Object -First 1
+    }
+
+    if ($existingNamedPlan) {
+        $HostingPlan = if ($existingNamedPlan.Sku.Tier -eq "FlexConsumption") { "FlexConsumption" } else { "Classic" }
+        $autoResolution = "Auto inferred from existing plan SKU '$($existingNamedPlan.Sku.Name)/$($existingNamedPlan.Sku.Tier)'"
+    }
+    else {
+        $HostingPlan = if ($AzureCloud -eq "AzureUSGovernment") { "Classic" } else { "FlexConsumption" }
+        $autoResolution = if ($AzureCloud -eq "AzureUSGovernment") { "Auto default for Azure Government" } else { "Auto default for Azure Public" }
+    }
+}
+
+$isFlexConsumption = ($HostingPlan -eq "FlexConsumption")
+if ($isFlexConsumption -and $AzureCloud -eq "AzureUSGovernment") {
+    throw "Flex Consumption is not currently available in Azure Government. Use -HostingPlan Classic with -AzureCloud AzureUSGovernment."
+}
+
+if ($isFlexConsumption) {
+    $resolutionNote = if ($autoResolution) { " ($autoResolution)" } else { "" }
+    Write-Host "Hosting plan: Flex Consumption (Linux, PowerShell 7.4)$resolutionNote" -ForegroundColor Cyan
+    if (-not $AppServicePlanName) {
+        $AppServicePlanName = "$FunctionAppName-plan"
+        $AppServicePlanResourceGroup = $ResourceGroupName
+    }
+}
+else {
+    $resolutionNote = if ($autoResolution) { " ($autoResolution)" } else { "" }
+    Write-Host "Hosting plan: Classic (Basic B1 / existing ASP)$resolutionNote"
 }
 
 # Verify Resource Group exists
@@ -334,27 +477,10 @@ if ($isFlexConsumption) {
 
     if (-not $appServicePlan) {
         Write-Host "Creating Flex Consumption plan (FC1, Linux) via ARM..."
-        $planProperties = @{
-            reserved = $true  # Linux required for Flex
-        }
-        $planSku = @{
-            name     = "FC1"
-            tier     = "FlexConsumption"
-            family   = "FC"
-            capacity = 0
-        }
-        New-AzResource `
+        $appServicePlan = New-FlexConsumptionPlanWithRetry `
             -ResourceGroupName $AppServicePlanResourceGroup `
-            -ResourceType "Microsoft.Web/serverfarms" `
-            -ResourceName $AppServicePlanName `
-            -Location $Location `
-            -Kind "functionapp" `
-            -Properties $planProperties `
-            -Sku $planSku `
-            -Force `
-            -ErrorAction Stop | Out-Null
-
-        $appServicePlan = Get-AzAppServicePlan -ResourceGroupName $AppServicePlanResourceGroup -Name $AppServicePlanName
+            -Name $AppServicePlanName `
+            -Location $Location
         Write-Host "Created Flex Consumption plan: $AppServicePlanName" -ForegroundColor Green
     }
     else {
@@ -380,7 +506,7 @@ elseif (-not $AppServicePlanName) {
         $existingSku = $appServicePlan.Sku.Tier
         if ($existingSku -in @("Free", "Shared")) {
             Write-Host "Existing plan '$AppServicePlanName' has SKU '$existingSku' which doesn't support Function Apps." -ForegroundColor Yellow
-            Write-Host "Deleting and recreating with Consumption (Y1) plan..." -ForegroundColor Yellow
+            Write-Host "Deleting and recreating with Basic (B1) plan..." -ForegroundColor Yellow
             Remove-AzAppServicePlan -ResourceGroupName $AppServicePlanResourceGroup -Name $AppServicePlanName -Force
             $needsCreation = $true
         } elseif ($existingSku -eq "FlexConsumption") {
@@ -641,13 +767,33 @@ while ($retryCount -lt $maxRetries -and -not $functionAppResource) {
     }
 }
 
-# Configure TLS and HTTPS settings using resource manager API
-Write-Host "Configuring TLS and HTTPS settings..."
+# Configure HTTPS, TLS, and HTTP/2 settings using the ARM configuration endpoint
+Write-Host "Configuring HTTPS-only, TLS 1.2, and HTTP/2..."
 $functionAppProperties = @{
     "httpsOnly" = $true
-    "minTlsVersion" = "1.2"
 }
-Set-AzResource -ResourceId $functionAppResource.ResourceId -Properties $functionAppProperties -Force
+Set-AzResource -ResourceId $functionAppResource.ResourceId -Properties $functionAppProperties -Force | Out-Null
+
+$webConfigPath = "$($functionAppResource.ResourceId)/config/web?api-version=2023-12-01"
+$webConfigPayload = @{
+    properties = @{
+        http20Enabled    = $true
+        minTlsVersion    = "1.2"
+        scmMinTlsVersion = "1.2"
+    }
+} | ConvertTo-Json -Depth 5 -Compress
+
+$webConfigResult = Invoke-AzRestMethod -Path $webConfigPath -Method PATCH -Payload $webConfigPayload -ErrorAction Stop
+if ($webConfigResult.StatusCode -notin 200, 201, 202) {
+    throw "Failed to configure Function App web settings. ARM returned status $($webConfigResult.StatusCode): $($webConfigResult.Content)"
+}
+
+$webConfigResult = Invoke-AzRestMethod -Path $webConfigPath -Method GET -ErrorAction Stop
+$webConfig = $webConfigResult.Content | ConvertFrom-Json
+if ($webConfig.properties.http20Enabled -ne $true) {
+    throw "HTTP/2 verification failed for Function App '$FunctionAppName'."
+}
+Write-Host "HTTPS-only, TLS 1.2, and HTTP/2 configured successfully" -ForegroundColor Green
 
 # Wait for Function App to be fully provisioned before configuring settings
 Write-Host "Waiting for Function App to be fully provisioned..."
@@ -764,7 +910,7 @@ if (-not $isFlexConsumption) {
     $maxRetries = 5
     while ($retryCount -lt $maxRetries) {
         try {
-            Update-AzFunctionAppSetting -Name $FunctionAppName -ResourceGroupName $ResourceGroupName -AppSetting $runtimeSettings -ErrorAction Stop
+            Update-AzFunctionAppSetting -Name $FunctionAppName -ResourceGroupName $ResourceGroupName -AppSetting $runtimeSettings -Confirm:$false -ErrorAction Stop
             Write-Host "Runtime versions configured successfully" -ForegroundColor Green
             break
         }
@@ -821,7 +967,7 @@ if ($isFlexConsumption) {
     Write-Host "App settings applied via ARM" -ForegroundColor Green
 }
 else {
-    Update-AzFunctionAppSetting -Name $FunctionAppName -ResourceGroupName $ResourceGroupName -AppSetting $settings
+    Update-AzFunctionAppSetting -Name $FunctionAppName -ResourceGroupName $ResourceGroupName -AppSetting $settings -Confirm:$false
 }
 
 # Deploy function code

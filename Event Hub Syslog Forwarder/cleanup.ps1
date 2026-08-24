@@ -72,16 +72,8 @@ Write-Log "Derived Storage Account: $StorageAccountName" -Level Info
 $AppInsightsName = "$FunctionAppName-insights"
 Write-Log "Derived Application Insights: $AppInsightsName" -Level Info
 
-Write-Log "========================================" -Level Info
-
-# Prompt for confirmation
-$confirmation = Read-Host "Are you sure you want to delete these resources? (y/n)"
-if ($confirmation -ne 'y') {
-    Write-Log "Cleanup cancelled by user" -Level Warning
-    exit 0
-}
-
-Write-Log "User confirmed deletion - proceeding with cleanup" -Level Info
+# Derive the App Service Plan created by the default deployment
+$DefaultAppServicePlanName = "$FunctionAppName-plan"
 
 # Function to ensure we have a valid Azure context
 function Ensure-AzureConnection {
@@ -132,9 +124,71 @@ if (-not (Ensure-AzureConnection)) {
     exit 1
 }
 
+# Discover the attached plan before deleting the Function App. Only the generated
+# default plan is assumed to be owned by this deployment; named plans are preserved.
+Write-Log "Inspecting Function App hosting plan..." -Level Info
+$functionApp = Get-AzFunctionApp -ResourceGroupName $ResourceGroupName -Name $FunctionAppName -ErrorAction SilentlyContinue
+$deleteDefaultAppServicePlan = $false
+$attachedAppServicePlanName = $null
+$attachedAppServicePlanResourceGroup = $null
+
+if ($functionApp) {
+    $attachedPlanId = $functionApp.ServerFarmId
+    if (-not $attachedPlanId) {
+        $functionAppResource = Get-AzResource `
+            -ResourceGroupName $ResourceGroupName `
+            -ResourceName $FunctionAppName `
+            -ResourceType "Microsoft.Web/sites" `
+            -ExpandProperties `
+            -ErrorAction SilentlyContinue
+        if ($functionAppResource -and $functionAppResource.Properties.ServerFarmId) {
+            $attachedPlanId = $functionAppResource.Properties.ServerFarmId
+        }
+    }
+
+    if ($attachedPlanId -match '(?i)/resourceGroups/([^/]+)/providers/Microsoft\.Web/serverfarms/([^/]+)/?$') {
+        $attachedAppServicePlanResourceGroup = [Uri]::UnescapeDataString($Matches[1])
+        $attachedAppServicePlanName = [Uri]::UnescapeDataString($Matches[2])
+
+        if (
+            $attachedAppServicePlanName -ieq $DefaultAppServicePlanName -and
+            $attachedAppServicePlanResourceGroup -ieq $ResourceGroupName
+        ) {
+            $deleteDefaultAppServicePlan = $true
+            Write-Log "Default App Service Plan deletion target: $attachedAppServicePlanName" -Level Info
+        }
+        else {
+            Write-Log "Attached named App Service Plan will be preserved: $attachedAppServicePlanName (Resource Group: $attachedAppServicePlanResourceGroup)" -Level Info
+        }
+    }
+    elseif ($attachedPlanId) {
+        Write-Log "Unable to parse attached App Service Plan resource ID. The plan will be preserved: $attachedPlanId" -Level Warning
+    }
+    else {
+        Write-Log "Unable to determine the attached App Service Plan. No plan will be deleted." -Level Warning
+    }
+}
+else {
+    Write-Log "Function App not found. No App Service Plan will be inferred or deleted." -Level Warning
+}
+
+$totalResources = if ($deleteDefaultAppServicePlan) { 4 } else { 3 }
+Write-Log "Cleanup deletion targets: $totalResources" -Level Info
+Write-Log "========================================" -Level Info
+
+# Prompt for confirmation after determining the exact deletion targets
+$planPrompt = if ($deleteDefaultAppServicePlan) { ", including its default App Service Plan" } else { "" }
+$confirmation = Read-Host "Are you sure you want to delete these $totalResources resources$planPrompt? (y/n)"
+if ($confirmation -ne 'y') {
+    Write-Log "Cleanup cancelled by user" -Level Warning
+    exit 0
+}
+
+Write-Log "User confirmed deletion - proceeding with cleanup" -Level Info
+
 # Track deletion statistics
 $deletionStats = @{
-    Total = 3
+    Total = $totalResources
     Successful = 0
     Failed = 0
     NotFound = 0
@@ -145,10 +199,9 @@ Write-Log "Starting Resource Deletion" -Level Info
 Write-Log "========================================" -Level Info
 
 # Remove Function App
-Write-Log "Step 1/3: Removing Function App" -Level Info
+Write-Log "Step 1/$($totalResources): Removing Function App" -Level Info
 try {
     Write-Log "Checking if Function App '$FunctionAppName' exists..." -Level Info
-    $functionApp = Get-AzFunctionApp -ResourceGroupName $ResourceGroupName -Name $FunctionAppName -ErrorAction SilentlyContinue
 
     if ($null -eq $functionApp) {
         Write-Log "Function App '$FunctionAppName' not found - may have been already deleted" -Level Warning
@@ -170,8 +223,65 @@ catch {
     $deletionStats.Failed++
 }
 
+# Remove the default App Service Plan if no sites still use it
+if ($deleteDefaultAppServicePlan) {
+    Write-Log "Step 2/$($totalResources): Removing Default App Service Plan" -Level Info
+    try {
+        Write-Log "Checking if default App Service Plan '$DefaultAppServicePlanName' exists..." -Level Info
+        $appServicePlan = Get-AzAppServicePlan -ResourceGroupName $ResourceGroupName -Name $DefaultAppServicePlanName -ErrorAction SilentlyContinue
+
+        if ($null -eq $appServicePlan) {
+            Write-Log "Default App Service Plan '$DefaultAppServicePlanName' not found - may have been already deleted" -Level Warning
+            $deletionStats.NotFound++
+        }
+        else {
+            $planResourceId = if ($appServicePlan.Id) { $appServicePlan.Id } else { $appServicePlan.ResourceId }
+            if (-not $planResourceId) {
+                throw "Unable to determine the resource ID for App Service Plan '$DefaultAppServicePlanName'."
+            }
+            $sitesUsingPlan = @()
+
+            for ($attempt = 1; $attempt -le 6; $attempt++) {
+                $sitesUsingPlan = @(
+                    Get-AzResource -ResourceType "Microsoft.Web/sites" -ExpandProperties -ErrorAction Stop |
+                        Where-Object {
+                            $_.Properties.ServerFarmId -and
+                            $_.Properties.ServerFarmId.TrimEnd('/') -eq $planResourceId.TrimEnd('/')
+                        }
+                )
+
+                if ($sitesUsingPlan.Count -eq 0) {
+                    break
+                }
+
+                if ($attempt -lt 6) {
+                    Write-Log "Waiting for Function App deletion to release the plan... (attempt $attempt of 6)" -Level Info
+                    Start-Sleep -Seconds 5
+                }
+            }
+
+            if ($sitesUsingPlan.Count -gt 0) {
+                $siteNames = ($sitesUsingPlan.Name -join ", ")
+                Write-Log "Default App Service Plan is still used by: $siteNames. It will not be deleted." -Level Warning
+                $deletionStats.Failed++
+            }
+            else {
+                Remove-AzAppServicePlan -ResourceGroupName $ResourceGroupName -Name $DefaultAppServicePlanName -Force
+                Write-Log "Default App Service Plan '$DefaultAppServicePlanName' removed successfully" -Level Success
+                $deletionStats.Successful++
+            }
+        }
+    }
+    catch {
+        Write-Log "Error removing default App Service Plan '$DefaultAppServicePlanName': $_" -Level Error
+        Write-Log "Stack Trace: $($_.ScriptStackTrace)" -Level Error
+        $deletionStats.Failed++
+    }
+}
+
 # Remove Storage Account
-Write-Log "Step 2/3: Removing Storage Account" -Level Info
+$storageStep = if ($deleteDefaultAppServicePlan) { 3 } else { 2 }
+Write-Log "Step $storageStep/$($totalResources): Removing Storage Account" -Level Info
 try {
     Write-Log "Checking if Storage Account '$StorageAccountName' exists..." -Level Info
     $storageAccount = Get-AzStorageAccount -ResourceGroupName $ResourceGroupName -Name $StorageAccountName -ErrorAction SilentlyContinue
@@ -197,7 +307,8 @@ catch {
 }
 
 # Remove Application Insights
-Write-Log "Step 3/3: Removing Application Insights" -Level Info
+$appInsightsStep = if ($deleteDefaultAppServicePlan) { 4 } else { 3 }
+Write-Log "Step $appInsightsStep/$($totalResources): Removing Application Insights" -Level Info
 try {
     Write-Log "Checking if Application Insights '$AppInsightsName' exists..." -Level Info
     $appInsights = Get-AzApplicationInsights -ResourceGroupName $ResourceGroupName -Name $AppInsightsName -ErrorAction SilentlyContinue
