@@ -10,8 +10,9 @@ Azure Function that processes Azure Event Hub messages containing various log ty
 - **Retry with Exponential Backoff**: Automatically retry failed transmissions with configurable backoff
 - **Robust Timestamp Handling**: Flexible timestamp resolution that handles multiple record formats (PSCustomObject and Hashtable)
 - **Protocol Support**: SSL/TLS or UDP for syslog transmission
-- **Multi-cloud (Classic)**: Classic hosting works in Azure Public and Azure Government
-- **Flex Consumption (opt-in, public cloud)**: Linux Flex plan for secure-storage / VNet scenarios — not available in Azure Government
+- **Secure Function endpoint**: Deployment enforces HTTPS-only access, TLS 1.2, and HTTP/2
+- **Cloud-aware hosting default**: `-HostingPlan Auto` infers Classic or Flex from an existing named plan; without one, it uses Linux Flex Consumption in Azure Public and Windows Basic B1 in Azure Government
+- **Explicit hosting modes**: Classic works in both clouds; Flex Consumption is available only in Azure Public
 - **Comprehensive Error Handling**: Detailed error logging without failing the entire function
 
 ## Prerequisites
@@ -26,8 +27,8 @@ Azure Function that processes Azure Event Hub messages containing various log ty
   - Az.Functions
   - Az.EventHub
   - Az.ApplicationInsights
-- App Service Plan (optional for Classic - Consumption plan auto-created if not specified)
-- For Flex: pass `-HostingPlan FlexConsumption` (creates a new Linux Flex app; not an in-place migrate). **Not supported** with `-AzureCloud AzureUSGovernment`.
+- App Service Plan (optional; the cloud-aware default creates Flex Consumption in Azure Public or Basic B1 in Azure Government)
+- To target an existing plan, pass its name and Auto will infer the hosting mode. Explicit `-HostingPlan Classic` or `FlexConsumption` remains available. Changing between Classic and Flex requires a new Function App. Flex is **not supported** with `-AzureCloud AzureUSGovernment`.
 
 ## Supported Log Types
 
@@ -100,16 +101,18 @@ These commands have been tested via cloud shell
 ### Deployment Scenarios
 
 > **Hosting notes**
-> - Default `-HostingPlan` is `Classic` (backwards compatible).
-> - Flex runs **only** when you pass `-HostingPlan FlexConsumption` — there is no silent Classic→Flex switch based on an existing plan SKU.
+> - Default `-HostingPlan` is `Auto`: an existing named plan is inferred from its SKU. Without an existing named plan, Azure Public resolves to `FlexConsumption` and Azure Government resolves to `Classic` with an auto-created Basic B1 plan.
+> - Explicit `-HostingPlan Classic` or `-HostingPlan FlexConsumption` overrides Auto inference.
 > - Classic targeting an existing Flex app/plan (or the reverse) **throws** with a clear error. Azure does not support in-place Classic↔Flex migration — use a new Function App (and plan) name.
-> - App Service Plan is optional for Classic: if omitted, a Consumption (Y1) plan is created. Pass `-AppServicePlanName` to use an existing **Windows** plan (Basic/Premium/etc.).
+> - When Classic is selected and no plan is supplied, Azure Public creates Consumption Y1 and Azure Government creates Basic B1.
+> - Forwarder Flex instances default to 512 MB. Use `-FlexInstanceMemoryMB 2048` or `4096` to override the default.
+> - Deployment applies app settings non-interactively for both Classic and Flex.
 > - Prefer **single quotes** for `-EventHubConnection` (connection strings contain many `=` and `+` characters).
 
-#### Scenario 1: Simple Deployment (Auto-creates Consumption Plan)
+#### Scenario 1: Simple Azure Public Deployment (Auto-creates Flex Consumption Plan)
 
 ```powershell
-# Deploy with auto-created Consumption plan
+# Deploy with the cloud-aware default
 ./forward/deploy.ps1 `
     -ResourceGroupName "your-rg" `
     -Location "eastus" `
@@ -141,12 +144,14 @@ Get-AzAppServicePlan | Select-Object Name, ResourceGroup, Sku
     -AppServicePlanResourceGroup "plan-rg"  # Optional, defaults to same RG
 ```
 
+With `-HostingPlan Auto`, the existing plan's SKU selects Classic or Flex. Pass an explicit hosting mode when you want to require one rather than infer it.
+
 #### Scenario 3: Azure US Government Cloud (Classic only)
 
 > Flex Consumption is **not** available in Azure Government. Do not pass `-HostingPlan FlexConsumption` with `-AzureCloud AzureUSGovernment` (the script throws a clear error).
 
 ```powershell
-# With auto-created Consumption plan
+# With auto-created Basic B1 plan
 ./forward/deploy.ps1 `
     -ResourceGroupName "your-rg" `
     -Location "USGov Virginia" `
@@ -186,21 +191,26 @@ Get-AzAppServicePlan | Select-Object Name, ResourceGroup, Sku
     -EventHubConnection 'your-connection-string' `
     -Protocol SSL `
     -HostingPlan FlexConsumption `
-    -FlexInstanceMemoryMB 2048
+    -FlexInstanceMemoryMB 512
 ```
+
+`-FlexInstanceMemoryMB 512` is optional because 512 MB is the Forwarder default.
 
 The deployment script will:
 1. Verify Azure connection and resource group (cloud-aware)
 2. Create or update storage account (auto-named from function app name)
 3. Create or update Application Insights
-4. Create Classic ASP + Function App **or** Flex FC1 plan + Linux Flex Function App (when `-HostingPlan FlexConsumption`)
+4. Create the resolved hosting plan and Function App (Flex FC1 in Azure Public by default; Classic Basic B1 in Azure Government)
 5. Enable system-assigned managed identity (Defender for Cloud recommendation)
-6. Configure runtime settings and environment variables (Flex skips classic `FUNCTIONS_WORKER_RUNTIME*` / `WEBSITE_RUN_FROM_PACKAGE`)
-7. Deploy function code (Kudu VFS for Classic; OneDeploy `/api/publish?type=zip` or Azure CLI for Flex)
-8. Restart the function app
-9. Verify `EventHubTrigger` is registered and required app settings exist (retries; can take ~2 minutes on Basic/Gov)
+6. Enforce HTTPS-only access, TLS 1.2, and HTTP/2
+7. Configure runtime settings and environment variables (Flex skips classic `FUNCTIONS_WORKER_RUNTIME*` / `WEBSITE_RUN_FROM_PACKAGE`)
+8. Deploy function code (Kudu VFS for Classic; OneDeploy `/api/publish?type=zip` or Azure CLI for Flex)
+9. Restart the function app
+10. Verify `EventHubTrigger` is registered and required app settings exist (retries; can take ~2 minutes on Basic/Gov)
 
 > **Note:** Enabling the system-assigned identity clears the Defender recommendation. Event Hub access still uses `EVENTHUB_CONNECTION` until a later managed-identity auth migration.
+>
+> Rerun the deployment to enable HTTP/2 on an existing Function App. Microsoft Defender may take time to reassess the resource.
 
 ### Deployment Validation
 The script performs several validation steps:
@@ -258,7 +268,9 @@ Monitor the function using:
 | SSL handshake failure | Certificate issues | Verify syslog server certificate |
 | Messages not arriving | Event Hub binding issue | Check `EVENTHUB_CONNECTION` and `EVENT_HUB_NAME`; confirm `EventHubTrigger` is registered |
 | Deploy: no functions registered | Host still indexing, or list API lag (esp. Basic/Gov) | Re-run with updated script (retries); check Kudu `wwwroot/EventHubTrigger` and that Classic plan is Windows |
-| Flex deploy in Gov | Flex not available in Azure Government | Use Classic (`-HostingPlan Classic` or omit) |
+| Flex plan create returns HTTP 429 / exclusive lock | Transient App Service server-farm lock; Azure may still create the plan | The script rechecks the plan and retries with backoff. If an older script stopped after the plan appeared, rerun the same command safely |
+| Flex deploy in Gov | Flex not available in Azure Government | Omit `-HostingPlan` to use the Auto B1 default, or pass `-HostingPlan Classic` |
+| Existing named plan selects the wrong mode | The plan was not found in `-AppServicePlanResourceGroup`, or an explicit mode was supplied | Verify the plan resource group and use `-HostingPlan Auto` to infer its SKU |
 | Classic deploy hits Flex plan/app | Wrong hosting mode for existing resources | Use a new app/plan name for Classic, or pass `-HostingPlan FlexConsumption` |
 | Function timeout | Too many messages | Increase timeout or reduce batch size |
 
@@ -331,6 +343,8 @@ Remove all deployed resources:
     -ResourceGroupName "your-rg" `
     -FunctionAppName "your-func-name"
 ```
+
+Cleanup also removes the deployment-created default App Service Plan named `<FunctionAppName>-plan` after confirming no other sites use it. Differently named custom or shared plans are preserved.
 
 For sovereign clouds (e.g., US Gov):
 ```powershell

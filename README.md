@@ -6,8 +6,10 @@ A collection of Azure security and monitoring tools designed to enhance your Azu
 
 Both Function App projects support:
 
-- **Classic (default)** — Windows Consumption / Basic / existing App Service Plan; works in Azure Public and Azure Government
-- **Flex Consumption (opt-in)** — Linux Flex plan via `-HostingPlan FlexConsumption` (Azure Public only; not available in Azure Government). Not an in-place migrate from Classic.
+- **Cloud-aware default (`-HostingPlan Auto`)** — infer Classic or Flex when an existing plan name is supplied; otherwise use Linux Flex Consumption in Azure Public or Windows Basic B1 in Azure Government.
+- **Explicit Classic** — pass `-HostingPlan Classic` for a Windows Consumption / Basic / existing App Service Plan
+- **Explicit Flex Consumption** — pass `-HostingPlan FlexConsumption` for a Linux Flex plan (Azure Public only; not available in Azure Government). Changing between Classic and Flex requires a new Function App.
+- **Flex sizing** — both projects default to 512 MB and support explicit 2048 MB or 4096 MB overrides.
 - **System-assigned managed identity** — enabled on deploy (Defender for Cloud). Runtime Event Hub / Firewall auth still uses connection strings or service principal until a later migration.
 
 See each project's README for deploy parameters and scenarios.

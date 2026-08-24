@@ -24,7 +24,7 @@ This solution:
 - **API Access**: HTTP endpoints for testing and manual operations
 - **Secure Communications**: TLS 1.2 support with HTTPS-only connections
 - **Managed Identity**: Deploy enables a system-assigned managed identity. Runtime Azure auth still uses the service principal (`CLIENT_ID` / `CLIENT_SECRET`) until a later migration.
-- **Flex Consumption (opt-in, public cloud)**: Pass `-HostingPlan FlexConsumption` to create a **new** Linux Flex Function App (PowerShell 7.4). Default remains Classic (Windows B1 / existing ASP). Not available in Azure Government. Azure does not support in-place Classic↔Flex migration — use a new Function App name. There is no silent Classic→Flex switch based on plan SKU.
+- **Cloud-aware hosting default**: `-HostingPlan Auto` infers Classic or Flex from an existing named plan. Without one, it deploys a new Linux Flex Consumption Function App in Azure Public and a Windows Basic B1 Function App in Azure Government. Azure does not support in-place Classic↔Flex migration — use a new Function App name.
 
 ## Architecture
 
@@ -106,7 +106,7 @@ The function enforces the following security settings:
 
 - **TLS Version**: Uses TLS 1.2 for all communications
 - **HTTPS Enforcement**: Rejects non-HTTPS blocklist URLs when `ENFORCE_HTTPS_ONLY` is enabled (default)
-- **Function App Settings**: Configures the Function App with HTTPS-only access
+- **Function App Settings**: Configures HTTPS-only access and enables HTTP/2 to satisfy the Microsoft Defender recommendation
 
 ### Timer Schedule
 
@@ -182,14 +182,16 @@ Rules are processed in this order:
 ### Deployment Scenarios
 
 > **Hosting notes**
-> - Default `-HostingPlan` is `Classic` (backwards compatible).
-> - Flex runs **only** when you pass `-HostingPlan FlexConsumption` — no silent Classic→Flex switch.
+> - Default `-HostingPlan` is `Auto`: an existing named plan is inferred from its SKU. Without an existing named plan, Azure Public resolves to `FlexConsumption` and Azure Government resolves to `Classic` with an auto-created Basic B1 plan.
+> - Explicit `-HostingPlan Classic` or `-HostingPlan FlexConsumption` overrides Auto inference.
 > - Classic targeting an existing Flex app/plan (or the reverse) **throws**. Use a new Function App/plan name to change modes.
 > - App Service Plan is optional for Classic: if omitted, a Basic (B1) plan is created. Pass `-AppServicePlanName` for an existing Windows plan.
+> - Blocklist Flex instances default to 512 MB. Use `-FlexInstanceMemoryMB 2048` or `4096` to override the default.
+> - Deployment applies app settings non-interactively for both Classic and Flex.
 > - `host.json` sets `managedDependency.enabled = false` (Flex-safe; no PowerShell Gallery auto-install).
 
-#### Scenario 1: Simple Deployment (Auto-creates Basic B1 Plan)
-**Best for:** Timer-triggered workloads, cost optimization
+#### Scenario 1: Simple Azure Public Deployment (Auto-creates Flex Consumption Plan)
+**Best for:** New serverless deployments in Azure Public
 
 ```powershell
 ./block/deploy.ps1 `
@@ -221,6 +223,8 @@ Rules are processed in this order:
     -AppServicePlanName "existing-plan-name" `
     -AppServicePlanResourceGroup "plan-rg"  # Optional, defaults to same RG
 ```
+
+With `-HostingPlan Auto`, the existing plan's SKU selects Classic or Flex. Pass `-HostingPlan Classic` explicitly when you want to require Classic rather than infer it.
 
 #### Scenario 3: Azure US Government Cloud (Classic only)
 **Note:** Flex Consumption is **not** available in Azure Government. Works with auto-created Basic B1 or an existing Windows plan.
@@ -269,10 +273,12 @@ Rules are processed in this order:
     -ClientSecret "your-client-secret" `
     -BlocklistUrl "https://your-blocklist-url" `
     -HostingPlan FlexConsumption `
-    -FlexInstanceMemoryMB 2048
+    -FlexInstanceMemoryMB 512
 ```
 
-After deploy, the script restarts the app and verifies the `blocklist` function is registered (with retries).
+`-FlexInstanceMemoryMB 512` is optional because 512 MB is the Blocklist default.
+
+After deploy, the script restarts the app and verifies the `blocklist` function is registered (with retries). Rerun the deployment to enable HTTP/2 on an existing Function App; Microsoft Defender may take time to reassess the resource.
 
 #### Scenario 5: Custom Cloud Endpoints (Advanced)
 **Use case:** Custom sovereign cloud configurations
@@ -336,7 +342,13 @@ Access logs through:
 
 7. **Flex / hosting mode errors**
    - Flex + Azure Government: use Classic instead
+   - With `-HostingPlan Auto`, an existing named plan selects Classic or Flex from its SKU; a missing named plan still uses the cloud default
    - Classic deploy against a Flex app/plan (or vice versa): use a new Function App name or the matching `-HostingPlan`
+
+8. **Flex plan creation returns HTTP 429 / exclusive lock**
+   - Azure can create the plan while returning a transient server-farm lock response
+   - The deployment script checks for the created plan and retries lock/throttle responses with exponential backoff
+   - If an older script stopped after the plan appeared, rerun the same deployment command; the existing-plan check makes the rerun safe
 
 ## Performance Metrics
 
@@ -368,14 +380,18 @@ To remove all deployed resources:
 ```powershell
 ./block/cleanup.ps1 `
     -ResourceGroupName "your-rg" `
-    -FunctionAppName "your-func-name"
+    -FunctionAppName "your-func-name" `
+    -FirewallPolicyName "your-policy"
 ```
+
+Cleanup first removes and verifies the Function App so its timer cannot recreate firewall artifacts. It then waits up to 15 minutes for the Firewall Policy and `CeleriumRuleCollectionGroup` provisioning states to become ready, handling deletion races caused by concurrent Azure operations. After Azure confirms the group is absent, cleanup removes and verifies all IP Groups matching `fw-blocklist-*` in the resource group. It also removes the deployment-created default App Service Plan named `<FunctionAppName>-plan`; differently named custom or shared App Service Plans are preserved. Cleanup exits with a non-zero status and lists anything it could not confirm as removed.
 
 For sovereign clouds (e.g., US Gov):
 ```powershell
 ./block/cleanup.ps1 `
     -ResourceGroupName "your-rg" `
     -FunctionAppName "your-func-name" `
+    -FirewallPolicyName "your-policy" `
     -AzureCloud AzureUSGovernment
 ```
 
