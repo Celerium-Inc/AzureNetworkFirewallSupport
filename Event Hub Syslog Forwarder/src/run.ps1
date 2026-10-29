@@ -326,17 +326,10 @@ function Parse-DestPublicIps
 {
     param (
         [string]$FlowType,
-        [string]$DestPublicIps,
-        [string]$FlowDirection,
-        [string]$L7Protocol
+        [string]$DestPublicIps
     )
 
     $publicIpEntries = @()
-
-    if ($FlowType -eq "AzurePublic" -and $FlowDirection -eq "Inbound" -and $L7Protocol -eq "Unknown") {
-        Write-Host "Skipping AzurePublic Inbound flow with Unknown L7Protocol"
-        return @()
-    }
 
     if ($DestPublicIps -and $DestPublicIps -ne "") {
         $destPublicIpsEntries = $DestPublicIps -split ' '
@@ -385,6 +378,14 @@ function Process-FlowLog
 
     $syslogMessages = @()
 
+    $ignoredNic = "unknown-rg/unknown-nic"
+    $srcNic = $record.SrcNic
+    $destNic = $record.DestNic
+    if ($srcNic -eq $ignoredNic -or $destNic -eq $ignoredNic) {
+        Write-Host "Skipping flow with ignored NIC SrcNic=$srcNic DestNic=$destNic"
+        return @()
+    }
+
     # Use robust timestamp resolver
     $timestamp         = Resolve-RecordTimestampRfc3339 -Record $record -PreferredFields @("TimeGenerated","time","_TimeReceived") -LogFallback
     $timeProcessed     = Resolve-RecordTimestampRfc3339 -Record $record -PreferredFields @("TimeProcessed","TimeGenerated","time","_TimeReceived")
@@ -408,7 +409,7 @@ function Process-FlowLog
 
     $publicIpEntries = @()
     if ($flowType -eq "ExternalPublic" -or $flowType -eq "AzurePublic") {
-        $publicIpEntries = Parse-DestPublicIps -FlowType $flowType -DestPublicIps $record.DestPublicIps -FlowDirection $flowDirection -L7Protocol $l7Protocol
+        $publicIpEntries = Parse-DestPublicIps -FlowType $flowType -DestPublicIps $record.DestPublicIps
     }
 
     $flowStatus = $record.FlowStatus
@@ -419,7 +420,6 @@ function Process-FlowLog
 
     $destSubscription = $record.DestSubscription
     $destRegion = $record.DestRegion
-    $destNic = $record.DestNic
     $destVm = $record.DestVm
     $destSubnet = $record.DestSubnet
 
@@ -446,7 +446,7 @@ function Process-FlowLog
                           "Protocol=${protocol} L7Protocol=${l7Protocol} Direction=${flowDirection} Status=${flowStatus} " +             `
                           "MacAddress=${macAddress} FlowLogResourceId=${flowLogResourceId} TargetResourceId=${targetResourceId} " +             `
                           "TargetResourceType=${targetResourceType} DestSubscription=${destSubscription} DestRegion=${destRegion} " +             `
-                          "DestNic=${destNic} DestVm=${destVm} DestSubnet=${destSubnet} FlowEncryption=${flowEncryption} " +             `
+                          "SrcNic=${srcNic} DestNic=${destNic} DestVm=${destVm} DestSubnet=${destSubnet} FlowEncryption=${flowEncryption} " +             `
                           "AllowedInFlows=${allowedInFlows} DeniedInFlows=${deniedInFlows} AllowedOutFlows=${allowedOutFlows} " +             `
                           "DeniedOutFlows=${deniedOutFlows} PacketsDestToSrc=${packetsDestToSrc} PacketsSrcToDest=${packetsSrcToDest} " +             `
                           "BytesDestToSrc={1} BytesSrcToDest={2} CompletedFlows=${completedFlows} " +             `
