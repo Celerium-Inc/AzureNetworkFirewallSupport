@@ -17,6 +17,98 @@ param(
 # Error handling
 $ErrorActionPreference = 'Stop'
 
+$script:SecureStorageManagedByTag = "AzureNetworkFirewallSupport"
+$script:SecureStorageGroupIds = @("blob", "file", "queue", "table")
+
+function Get-ResourceManagedByTag {
+    param($Resource)
+
+    if (-not $Resource) {
+        return $null
+    }
+
+    if ($Resource.Tags -and $Resource.Tags.ContainsKey("ManagedBy")) {
+        return [string]$Resource.Tags["ManagedBy"]
+    }
+    if ($Resource.Tag -and $Resource.Tag.ContainsKey("ManagedBy")) {
+        return [string]$Resource.Tag["ManagedBy"]
+    }
+
+    return $null
+}
+
+function Test-IsDeployOwnedResource {
+    param($Resource)
+
+    return (Get-ResourceManagedByTag -Resource $Resource) -eq $script:SecureStorageManagedByTag
+}
+
+function Remove-DeployOwnedStorageResources {
+    param(
+        [string]$ResourceGroupName,
+        [string]$StorageAccountName
+    )
+
+    $result = @{
+        PrivateEndpointsRemoved = New-Object System.Collections.Generic.List[string]
+        StorageDeleted          = $false
+        StoragePreserved        = $false
+        Failures                = New-Object System.Collections.Generic.List[string]
+    }
+
+    $foundCustomerPrivateEndpoint = $false
+    foreach ($groupId in $script:SecureStorageGroupIds) {
+        $peName = "$StorageAccountName-$groupId-pe"
+        try {
+            $privateEndpoint = Get-AzPrivateEndpoint -Name $peName -ResourceGroupName $ResourceGroupName -ErrorAction SilentlyContinue
+            if (-not $privateEndpoint) {
+                continue
+            }
+
+            if (-not (Test-IsDeployOwnedResource -Resource $privateEndpoint)) {
+                Write-Host "Preserving customer-owned private endpoint $peName" -ForegroundColor Yellow
+                $foundCustomerPrivateEndpoint = $true
+                continue
+            }
+
+            Write-Host "Removing private endpoint $peName..."
+            Remove-AzPrivateEndpoint -Name $peName -ResourceGroupName $ResourceGroupName -Force -ErrorAction Stop
+            $result.PrivateEndpointsRemoved.Add($peName) | Out-Null
+            Write-Host "Private endpoint $peName removed" -ForegroundColor Green
+        }
+        catch {
+            Write-Host "Error removing private endpoint $peName : $_" -ForegroundColor Red
+            $result.Failures.Add("Private endpoint '$peName'") | Out-Null
+        }
+    }
+
+    try {
+        $storageAccount = Get-AzStorageAccount -ResourceGroupName $ResourceGroupName -Name $StorageAccountName -ErrorAction SilentlyContinue
+        if (-not $storageAccount) {
+            Write-Host "Storage account $StorageAccountName was already absent"
+            return $result
+        }
+
+        $isDeployOwned = Test-IsDeployOwnedResource -Resource $storageAccount
+        if (-not $isDeployOwned -and $foundCustomerPrivateEndpoint) {
+            Write-Host "Preserving customer-owned storage account $StorageAccountName" -ForegroundColor Yellow
+            $result.StoragePreserved = $true
+            return $result
+        }
+
+        Write-Host "Removing storage account $StorageAccountName..."
+        Remove-AzStorageAccount -ResourceGroupName $ResourceGroupName -Name $StorageAccountName -Force -ErrorAction Stop
+        $result.StorageDeleted = $true
+        Write-Host "Storage account $StorageAccountName removed" -ForegroundColor Green
+    }
+    catch {
+        Write-Host "Error removing storage account $StorageAccountName : $_" -ForegroundColor Red
+        $result.Failures.Add("Storage Account '$StorageAccountName'") | Out-Null
+    }
+
+    return $result
+}
+
 # Helper function to generate valid storage account name
 function Get-ValidStorageAccountName {
     param([string]$FunctionAppName)
@@ -507,14 +599,15 @@ catch {
     $cleanupFailures.Add("Default App Service Plan '$DefaultAppServicePlanName'") | Out-Null
 }
 
-# Remove Storage Account
+# Remove deploy-owned private endpoints, then the storage account only if this deploy tagged it.
 try {
-    Write-Host "Removing Storage Account $StorageAccountName..."
-    Remove-AzStorageAccount -ResourceGroupName $ResourceGroupName -Name $StorageAccountName -Force
-    Write-Host "Storage Account removed successfully"
+    $storageCleanup = Remove-DeployOwnedStorageResources -ResourceGroupName $ResourceGroupName -StorageAccountName $StorageAccountName
+    foreach ($failure in $storageCleanup.Failures) {
+        $cleanupFailures.Add($failure) | Out-Null
+    }
 }
 catch {
-    Write-Host "Error removing Storage Account: $_" -ForegroundColor Red
+    Write-Host "Error removing storage networking: $_" -ForegroundColor Red
     $cleanupFailures.Add("Storage Account '$StorageAccountName'") | Out-Null
 }
 

@@ -11,8 +11,9 @@ Both Function App projects support:
 - **Explicit Flex Consumption** — pass `-HostingPlan FlexConsumption` for a Linux Flex plan (Azure Public only; not available in Azure Government). Changing between Classic and Flex requires a new Function App.
 - **Flex sizing** — both projects default to 512 MB and support explicit 2048 MB or 4096 MB overrides.
 - **System-assigned managed identity** — enabled on deploy (Defender for Cloud). Runtime Event Hub / Firewall auth still uses connection strings or service principal until a later migration.
+- **Optional secure storage** — pass an existing locked-down storage account, or omit the name and supply a VNet plus subnets so deploy creates private endpoints and disables public access. Either path VNet-integrates the Function App so Microsoft Defender internet-exposure findings can clear. Flex create-and-lock publishes the package while storage is still public, then creates private endpoints and disables public access. A rerun re-enables the public endpoint only for that upload. Flex secure-storage requires the subscription to have `Microsoft.App` registered; Classic (including Azure Government) does not. Defender reassessment can lag after a successful deploy.
 
-See each project's README for deploy parameters and scenarios.
+See each project's README for the full `deploy.ps1` / `cleanup.ps1` parameter list and scenarios.
 
 ## Projects
 

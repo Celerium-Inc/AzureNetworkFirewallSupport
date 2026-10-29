@@ -107,6 +107,7 @@ The function enforces the following security settings:
 - **TLS Version**: Uses TLS 1.2 for all communications
 - **HTTPS Enforcement**: Rejects non-HTTPS blocklist URLs when `ENFORCE_HTTPS_ONLY` is enabled (default)
 - **Function App Settings**: Configures HTTPS-only access and enables HTTP/2 to satisfy the Microsoft Defender recommendation
+- **Secure storage (optional)**: Use an existing locked-down storage account, or let deploy create private endpoints and disable public access. Both paths VNet-integrate the Function App.
 
 ### Timer Schedule
 
@@ -163,6 +164,72 @@ Rules are processed in this order:
 1. **Blackhole DNAT Collection** (Priority 100) - Customer's custom DNAT rules
 2. **Blocked-IP Collection** (Priority 101) - Automated outbound blocking rules
 
+## Script parameters
+
+### `deploy.ps1`
+
+#### Required
+
+| Parameter | Description |
+|-----------|-------------|
+| `-ResourceGroupName` | Resource group for the Function App, storage (when created), Application Insights, and deploy-owned private endpoints. Must already exist. |
+| `-Location` | Azure region for new resources (for example `eastus` or `USGov Virginia`). |
+| `-FunctionAppName` | Function App name. Also used to derive the default storage account name (`<sanitized-name>storage`, max 24 characters) and the default plan name (`<FunctionAppName>-plan`). |
+| `-FirewallPolicyName` | Azure Firewall Policy the function updates. |
+| `-FirewallName` | Azure Firewall name written to app settings. |
+| `-TenantId` | Microsoft Entra tenant ID for the runtime service principal. |
+| `-ClientId` | Application (client) ID for the runtime service principal. |
+| `-ClientSecret` | Client secret for the runtime service principal. |
+| `-BlocklistUrl` | HTTPS URL of the IP blocklist to import. |
+
+#### Optional hosting and cloud
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `-AzureCloud` | `AzurePublicCloud` | `AzurePublicCloud` or `AzureUSGovernment`. Selects ARM login environment and storage DNS suffix (`core.windows.net` vs `core.usgovcloudapi.net`). |
+| `-AuthorityHost` | Derived from `-AzureCloud` | Override AAD authority (for example `https://login.microsoftonline.us`). |
+| `-ArmEndpoint` | Derived from `-AzureCloud` | Override ARM endpoint (for example `https://management.usgovcloudapi.net`). |
+| `-HostingPlan` | `Auto` | `Auto`, `Classic`, or `FlexConsumption`. Auto infers Classic or Flex from an existing named plan; otherwise Flex in Azure Public and Classic B1 in Azure Government. Flex is not available in Azure Government. Classic↔Flex in-place migration is not supported. |
+| `-FlexInstanceMemoryMB` | `512` | Flex instance memory: `512`, `2048`, or `4096`. Ignored for Classic. |
+| `-AppServicePlanName` | Auto-created `<FunctionAppName>-plan` | Existing plan to use. With `-HostingPlan Auto`, the plan SKU selects Classic or Flex. |
+| `-AppServicePlanResourceGroup` | `-ResourceGroupName` | Resource group of `-AppServicePlanName` when the plan lives in another group. |
+
+#### Optional secure storage
+
+VNet and subnets are **customer prerequisites**. Deploy never creates a VNet. Secure paths require `Az.Network` and `Az.PrivateDns`. Consumption (Y1) is rejected because it cannot use regional VNet integration.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `-StorageAccountName` | Derived from `-FunctionAppName` | Existing storage account to use as-is. When set, deploy does **not** create private endpoints or change the account firewall. Requires `-VNetName` and `-IntegrationSubnetName`. |
+| `-StorageAccountResourceGroup` | `-ResourceGroupName` | Resource group of `-StorageAccountName` when the account lives in another group. |
+| `-VNetName` | None | Existing virtual network used for Function App integration (and, on create-and-lock, private endpoints). |
+| `-VNetResourceGroup` | `-ResourceGroupName` | Resource group of `-VNetName` when the VNet lives in another group. |
+| `-IntegrationSubnetName` | None | Existing subnet for Function App VNet integration. Classic requires delegation `Microsoft.Web/serverFarms`. Flex requires `Microsoft.App/environments`. |
+| `-PrivateEndpointSubnetName` | None | Existing subnet for storage private endpoints. Required only for create-and-lock. Must be different from the integration subnet. Ignored when `-StorageAccountName` is set. |
+
+**Which combination to pass**
+
+| Path | Parameters to pass | What deploy does |
+|------|--------------------|------------------|
+| Public (default) | None of the secure-storage parameters | Creates or reuses a public `Standard_LRS` account named from the Function App. |
+| Existing storage | `-StorageAccountName` + `-VNetName` + `-IntegrationSubnetName` | Uses that account unchanged. VNet-integrates the Function App, enables route-all, and on Classic sets `vnetContentShareEnabled`. |
+| Create and lock | `-VNetName` + `-IntegrationSubnetName` + `-PrivateEndpointSubnetName` (no storage name) | Creates storage, then sets `publicNetworkAccess=Disabled` and `defaultAction=Deny` after private endpoints and VNet integration exist. Flex publishes the package while storage is still public, then creates blob/file/queue/table private endpoints, private DNS, and VNet integration, and locks the account. A rerun where those private endpoints already exist re-enables the public endpoint only for the upload, confirms Azure kept `publicNetworkAccess=Enabled` and `defaultAction=Allow`, and locks it again. Classic creates the private endpoints first and locks storage before the Kudu upload. |
+
+Partial combinations throw (for example a storage name without a VNet, or a VNet without the subnets required for that path).
+
+**Flex prerequisite:** Azure Public Flex secure-storage (existing account or create-and-lock) requires the subscription to have `Microsoft.App` registered. Deploy calls `Get-AzResourceProvider` / `Register-AzResourceProvider` and waits until `RegistrationState` is `Registered`. If registration is denied, run `Register-AzResourceProvider -ProviderNamespace Microsoft.App` with a subscription Owner or Contributor, then rerun deploy. Classic (including Azure Government) does not need this.
+
+### `cleanup.ps1`
+
+| Parameter | Required | Default | Description |
+|-----------|:--------:|---------|-------------|
+| `-ResourceGroupName` | Yes | | Resource group that contains the Function App and deploy-created resources. |
+| `-FunctionAppName` | Yes | | Function App to delete. Also used to derive the default storage account and plan names. |
+| `-FirewallPolicyName` | Yes | | Firewall Policy whose `CeleriumRuleCollectionGroup` and `fw-blocklist-*` IP Groups are removed. |
+| `-AzureCloud` | No | `AzurePublicCloud` | `AzurePublicCloud` or `AzureUSGovernment`. |
+
+Cleanup does not take VNet or storage-name parameters. It deletes deploy-owned storage and `{storage}-{blob\|file\|queue\|table}-pe` private endpoints tagged `ManagedBy=AzureNetworkFirewallSupport`. Customer-owned storage (used with `-StorageAccountName` on deploy), VNets, subnets, and shared private DNS zones are preserved.
+
 ## Deployment
 
 1. Upload the solution files with this structure:
@@ -173,6 +240,7 @@ Rules are processed in this order:
       - src/
          - function.json
          - host.json
+         - profile.ps1
          - requirements.psd1
          - run.ps1
    ```
@@ -189,6 +257,8 @@ Rules are processed in this order:
 > - Blocklist Flex instances default to 512 MB. Use `-FlexInstanceMemoryMB 2048` or `4096` to override the default.
 > - Deployment applies app settings non-interactively for both Classic and Flex.
 > - `host.json` sets `managedDependency.enabled = false` (Flex-safe; no PowerShell Gallery auto-install).
+> - Deploy overwrites `wwwroot/profile.ps1` with a no-op file so the platform template does not call `Connect-AzAccount -Identity` (Az modules are not installed).
+> - Secure storage is opt-in. See [Optional secure storage](#optional-secure-storage) for the public, existing-account, and create-and-lock parameter combinations.
 
 #### Scenario 1: Simple Azure Public Deployment (Auto-creates Flex Consumption Plan)
 **Best for:** New serverless deployments in Azure Public
@@ -259,7 +329,7 @@ With `-HostingPlan Auto`, the existing plan's SKU selects Classic or Flex. Pass 
 ```
 
 #### Scenario 4: Flex Consumption (Linux, Azure Public only)
-**Best for:** Secure storage / VNet scenarios. Creates a **new** Linux Flex app (not an in-place Classic migrate). One app per Flex plan. PowerShell 7.4 only.
+**Best for:** New Linux Flex apps in Azure Public. Creates a **new** Flex app (not an in-place Classic migrate). One app per Flex plan. PowerShell 7.6 only. For private storage, combine Flex with Scenario 5 or 6. The subscription must have `Microsoft.App` registered (`Get-AzResourceProvider` / `Register-AzResourceProvider`). Classic does not need this.
 
 ```powershell
 ./block/deploy.ps1 `
@@ -280,7 +350,57 @@ With `-HostingPlan Auto`, the existing plan's SKU selects Classic or Flex. Pass 
 
 After deploy, the script restarts the app and verifies the `blocklist` function is registered (with retries). Rerun the deployment to enable HTTP/2 on an existing Function App; Microsoft Defender may take time to reassess the resource.
 
-#### Scenario 5: Custom Cloud Endpoints (Advanced)
+#### Scenario 5: Existing secured storage account
+**Best for:** Storage already locked down (private endpoints + public access disabled). Deploy uses that account as-is and only VNet-integrates the Function App.
+
+The VNet and integration subnet must already exist. Classic requires `Microsoft.Web/serverFarms` delegation; Flex requires `Microsoft.App/environments` and a registered `Microsoft.App` resource provider. Classic (including Azure Government) does not need `Microsoft.App`.
+
+```powershell
+./block/deploy.ps1 `
+    -ResourceGroupName "your-rg" `
+    -Location "USGov Virginia" `
+    -FunctionAppName "your-func-name" `
+    -FirewallPolicyName "your-policy" `
+    -FirewallName "your-firewall" `
+    -TenantId "your-tenant-id" `
+    -ClientId "your-client-id" `
+    -ClientSecret "your-client-secret" `
+    -BlocklistUrl "https://your-blocklist-url" `
+    -AzureCloud AzureUSGovernment `
+    -StorageAccountName "yoursecuredstorage" `
+    -StorageAccountResourceGroup "your-rg" `
+    -VNetName "your-vnet" `
+    -VNetResourceGroup "your-rg" `
+    -IntegrationSubnetName "appservice-integration-subnet"
+```
+
+`-StorageAccountResourceGroup` and `-VNetResourceGroup` are optional when those resources are in `-ResourceGroupName`.
+
+#### Scenario 6: Create and lock storage
+**Best for:** New storage that must not be internet-exposed. Pass a VNet, Function App integration subnet, and private-endpoint subnet. Flex publishes the package while the new storage account is still public, then creates blob/file/queue/table private endpoints, private DNS, and VNet integration, and disables public network access. A rerun against private endpoints that already exist re-enables that public endpoint only for the upload, confirms the setting stuck, and locks the account again. Classic creates the private endpoints first and disables public network access before the Kudu upload.
+
+```powershell
+./block/deploy.ps1 `
+    -ResourceGroupName "your-rg" `
+    -Location "eastus" `
+    -FunctionAppName "your-func-name" `
+    -FirewallPolicyName "your-policy" `
+    -FirewallName "your-firewall" `
+    -TenantId "your-tenant-id" `
+    -ClientId "your-client-id" `
+    -ClientSecret "your-client-secret" `
+    -BlocklistUrl "https://your-blocklist-url" `
+    -VNetName "your-vnet" `
+    -VNetResourceGroup "your-rg" `
+    -IntegrationSubnetName "appservice-integration-subnet" `
+    -PrivateEndpointSubnetName "private-endpoints-subnet"
+```
+
+`-VNetResourceGroup` is optional when the VNet is in `-ResourceGroupName`.
+
+Requires `Az.Network` and `Az.PrivateDns`. Flex also requires a registered `Microsoft.App` resource provider (`Get-AzResourceProvider` / `Register-AzResourceProvider`); Classic, including Azure Government, does not. Microsoft Defender may take time to reassess the storage account after deploy.
+
+#### Scenario 7: Custom Cloud Endpoints (Advanced)
 **Use case:** Custom sovereign cloud configurations
 
 ```powershell
@@ -331,24 +451,35 @@ Access logs through:
    - The function implements exponential backoff for retries
    - Consider adjusting the update frequency if persistent
 
-5. **Rule Collection Issues**
+5. **Function host fails after secure storage**
+   - Confirm the Function App is VNet-integrated to the delegated subnet
+   - For create-and-lock, confirm blob/file/queue/table private endpoints and private DNS links exist
+   - Classic integration subnets must be delegated to `Microsoft.Web/serverFarms`; Flex uses `Microsoft.App/environments`
+   - Flex VNet join also requires `Microsoft.App` registered (`Register-AzResourceProvider -ProviderNamespace Microsoft.App`). Classic does not.
+
+6. **Rule Collection Issues**
    - The function creates both Blackhole (DNAT) and Blocked-IP (Filter) collections
    - Ensure the Azure Firewall Policy supports both collection types
    - Check that rule priorities don't conflict with existing rules
 
-6. **Cross-Cloud Authentication (AADSTS900382)**
+7. **Cross-Cloud Authentication (AADSTS900382)**
    - Ensure `AZURE_CLOUD` or `AZURE_CLOUD_ENVIRONMENT`, or the `AZURE_AUTHORITY_HOST`/`AZURE_ARM_ENDPOINT` overrides are set correctly for your tenant
    - Example for US Gov: set `AZURE_CLOUD=AzureUSGovernment`
 
-7. **Flex / hosting mode errors**
+8. **Flex / hosting mode errors**
    - Flex + Azure Government: use Classic instead
    - With `-HostingPlan Auto`, an existing named plan selects Classic or Flex from its SKU; a missing named plan still uses the cloud default
    - Classic deploy against a Flex app/plan (or vice versa): use a new Function App name or the matching `-HostingPlan`
+   - Flex VNet join 502 mentioning `Microsoft.App`: register the provider (`Register-AzResourceProvider -ProviderNamespace Microsoft.App`) and rerun. Classic does not need this.
 
-8. **Flex plan creation returns HTTP 429 / exclusive lock**
+9. **Flex plan creation returns HTTP 429 / exclusive lock**
    - Azure can create the plan while returning a transient server-farm lock response
    - The deployment script checks for the created plan and retries lock/throttle responses with exponential backoff
    - If an older script stopped after the plan appeared, rerun the same deployment command; the existing-plan check makes the rerun safe
+
+10. **`Disable-AzContextAutosave` / `Connect-AzAccount` errors in Function App logs**
+   - The platform `profile.ps1` calls Az.Accounts, which this app does not install
+   - Redeploy with a script that uploads `src/profile.ps1` to overwrite that template
 
 ## Performance Metrics
 
@@ -384,7 +515,7 @@ To remove all deployed resources:
     -FirewallPolicyName "your-policy"
 ```
 
-Cleanup first removes and verifies the Function App so its timer cannot recreate firewall artifacts. It then waits up to 15 minutes for the Firewall Policy and `CeleriumRuleCollectionGroup` provisioning states to become ready, handling deletion races caused by concurrent Azure operations. After Azure confirms the group is absent, cleanup removes and verifies all IP Groups matching `fw-blocklist-*` in the resource group. It also removes the deployment-created default App Service Plan named `<FunctionAppName>-plan`; differently named custom or shared App Service Plans are preserved. Cleanup exits with a non-zero status and lists anything it could not confirm as removed.
+Cleanup first removes and verifies the Function App so its timer cannot recreate firewall artifacts. It then waits up to 15 minutes for the Firewall Policy and `CeleriumRuleCollectionGroup` provisioning states to become ready, handling deletion races caused by concurrent Azure operations. After Azure confirms the group is absent, cleanup removes and verifies all IP Groups matching `fw-blocklist-*` in the resource group. It also removes the deployment-created default App Service Plan named `<FunctionAppName>-plan`; differently named custom or shared App Service Plans are preserved. Deploy-created storage and private endpoints (tagged `ManagedBy=AzureNetworkFirewallSupport`) are removed; customer-owned storage passed to deploy with `-StorageAccountName` is left in place, as are the prerequisite VNet, subnets, and shared private DNS zones. Cleanup exits with a non-zero status and lists anything it could not confirm as removed.
 
 For sovereign clouds (e.g., US Gov):
 ```powershell
